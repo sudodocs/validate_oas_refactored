@@ -7,10 +7,7 @@ import os
 import logging
 import sys
 import urllib.parse
-import base64
-import re
-import json
-import platform
+import tarfile
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -21,6 +18,63 @@ st.set_page_config(
     page_icon="📘",
     layout="wide"
 )
+
+# --- CRITICAL FIX: Manually Install Node.js v20 ---
+def ensure_node_installed():
+    """
+    Streamlit Cloud's default apt-get installs ancient Node.js (v10/v12).
+    rdme requires Node v20+.
+    This function manually downloads a standalone Node v20 binary and adds it to PATH.
+    """
+    node_version = "v20.11.0"
+    install_dir = Path("./node_runtime")
+    node_bin_path = install_dir / f"node-{node_version-linux-x64}" / "bin"
+    
+    # Check if we already have the right node version
+    try:
+        # Check if 'node' is in path and get version
+        result = subprocess.run(["node", "-v"], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip().startswith("v20"):
+            return # Already good!
+    except FileNotFoundError:
+        pass
+
+    # If not found or old, install it locally
+    if not (install_dir / "bin" / "node").exists():
+        with st.spinner(f"🔧 Installing Node.js {node_version} (Required for ReadMe v10)..."):
+            url = f"https://nodejs.org/dist/{node_version}/node-{node_version}-linux-x64.tar.xz"
+            
+            # Download
+            response = requests.get(url, stream=True)
+            if response.status_code == 200:
+                tar_path = Path("node.tar.xz")
+                with open(tar_path, 'wb') as f:
+                    f.write(response.raw.read())
+                
+                # Extract
+                with tarfile.open(tar_path) as tar:
+                    tar.extractall(install_dir)
+                
+                # Cleanup
+                os.remove(tar_path)
+            else:
+                st.error("Failed to download Node.js runtime.")
+                st.stop()
+    
+    # Add to PATH for this process
+    # The extraction creates a folder like 'node-v20.11.0-linux-x64/bin'
+    extracted_folder = list(install_dir.glob("node-v*-linux-x64"))[0]
+    bin_path = extracted_folder / "bin"
+    
+    # Update Environment Variables for the current process
+    os.environ["PATH"] = f"{str(bin_path.absolute())}{os.pathsep}{os.environ['PATH']}"
+    
+    # Verify
+    try:
+        ver = subprocess.check_output(["node", "-v"], text=True).strip()
+        # st.toast(f"✅ Runtime Ready: {ver}") # Optional visual confirmation
+    except Exception as e:
+        st.error(f"Failed to set up Node runtime: {e}")
 
 # --- Initialize Session State for Logs ---
 if 'logs' not in st.session_state:
@@ -38,7 +92,6 @@ class StreamlitLogHandler(logging.Handler):
         st.session_state.logs.append(msg)
         self.container.code("\n".join(st.session_state.logs), language="text")
         
-        # Update download button dynamically if placeholder exists
         if self.download_placeholder:
             unique_key = f"log_dl_rt_{len(st.session_state.logs)}"
             self.download_placeholder.download_button(
@@ -52,22 +105,9 @@ class StreamlitLogHandler(logging.Handler):
 # --- Helper Functions ---
 
 def get_npx_path():
-    # 1. Try standard system path lookup
-    path = shutil.which("npx")
-    if path:
-        return path
-    
-    # 2. Fallback: Look in the same directory as the Python executable
-    # (Common fix for Conda environments where bin/ isn't in PATH)
-    try:
-        python_dir = os.path.dirname(sys.executable)
-        candidate = os.path.join(python_dir, "npx")
-        if os.path.exists(candidate):
-            return candidate
-    except Exception:
-        pass
-        
-    return None
+    # Because we updated os.environ["PATH"] in ensure_node_installed(),
+    # shutil.which should now find the correct npx in our local folder.
+    return shutil.which("npx")
 
 def validate_env(api_key, required=True):
     if not api_key:
@@ -81,29 +121,17 @@ def run_command(command_list, log_logger):
     try:
         cmd_str = " ".join(command_list)
         log_logger.info(f"Running: {cmd_str}")
-
-        # --- FIX START: Inject Conda Bin Path ---
-        # Create a copy of the current environment variables
-        env = os.environ.copy()
         
-        # If we are calling an executable by full path (like /.../.conda/bin/npx),
-        # we must add its directory to PATH so it can find sibling binaries (like 'node').
-        executable_path = command_list[0]
-        if os.path.isabs(executable_path):
-            bin_dir = os.path.dirname(executable_path)
-            # Prepend this bin directory to the system PATH
-            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
-        # --- FIX END ---
-
+        # We must pass the updated os.environ to the subprocess
+        # so it inherits the PATH with our new Node.js binary
         process = subprocess.Popen(
             command_list,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding='utf-8',
-            env=env  # <--- Important: Pass the modified environment
+            env=os.environ.copy() 
         )
-        
         for line in process.stdout:
             clean = line.strip()
             if clean:
@@ -114,176 +142,84 @@ def run_command(command_list, log_logger):
         log_logger.error(f"❌ Command failed: {e}")
         return 1
 
-# --- AI Analysis Logic (Google Gen AI SDK) ---
+# --- AI Analysis Logic ---
 def analyze_errors_with_ai(log_content, api_key, model_name):
-    """Sends logs to Google Gen AI for analysis."""
-    if not api_key:
-        return None
-    
+    if not api_key: return None
     try:
         client = genai.Client(api_key=api_key)
-        
         prompt = f"""
-        You are an expert OpenAPI Validator. Analyze the following log output from a CI/CD pipeline. 
-        It contains errors from Swagger CLI, Redocly CLI, or ReadMe CLI (rdme v10).
-        
-        Identify the specific YAML errors (like trailing slashes, missing references, schema issues) 
-        and provide actionable solutions (code snippets) for the user to fix their OpenAPI YAML file.
-        
-        Keep it concise, professional, and use Markdown formatting.
-        
+        You are an expert OpenAPI Validator. Analyze the following log output.
+        Identify specific YAML errors and provide actionable solutions.
         Logs:
         {log_content}
         """
-        
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[prompt]
-        )
-        
+        response = client.models.generate_content(model=model_name, contents=[prompt])
         return response.text
     except Exception as e:
         return f"Exception calling AI: {e}"
 
 # --- Git Logic ---
-
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
     logger.info(f"🚀 Starting Git Operation for branch: {branch_name}...")
-    
     repo_path = Path(repo_dir)
-    # Clean inputs
-    if repo_url:
-        repo_url = repo_url.strip().strip('"').strip("'")
-    if git_username:
-        git_username = git_username.strip().strip('"').strip("'")
-    if git_token:
-        git_token = git_token.strip().strip('"').strip("'")
+    
+    if repo_url: repo_url = repo_url.strip().strip('"').strip("'")
+    if git_username: git_username = git_username.strip().strip('"').strip("'")
+    if git_token: git_token = git_token.strip().strip('"').strip("'")
 
-    # Clean URL Logic (Handle copy-paste errors)
     if repo_url and repo_url.count("https://") > 1:
         match = re.search(r"(https://github\.com/.*)$", repo_url)
-        if match:
-            repo_url = match.group(1)
+        if match: repo_url = match.group(1)
 
     auth_repo_url = repo_url
-    masked_repo_url = repo_url
-
     try:
-        if repo_url:
+        if repo_url and git_username and git_token:
             parsed = urllib.parse.urlparse(repo_url)
-            # Only embed auth if token/user provided
-            if git_username and git_token:
-                safe_user = urllib.parse.quote(git_username, safe='')
-                safe_token = urllib.parse.quote(git_token, safe='')
-                
-                if "@" in parsed.netloc:
-                    clean_netloc = parsed.netloc.split("@")[-1]
-                else:
-                    clean_netloc = parsed.netloc
-
-                auth_netloc = f"{safe_user}:{safe_token}@{clean_netloc}"
-                auth_repo_url = urllib.parse.urlunparse((
-                    parsed.scheme, auth_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment
-                ))
-                masked_netloc = f"****:***@{clean_netloc}"
-                masked_repo_url = urllib.parse.urlunparse((
-                    parsed.scheme, masked_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment
-                ))
-        
+            safe_user = urllib.parse.quote(git_username, safe='')
+            safe_token = urllib.parse.quote(git_token, safe='')
+            clean_netloc = parsed.netloc.split("@")[-1] if "@" in parsed.netloc else parsed.netloc
+            auth_netloc = f"{safe_user}:{safe_token}@{clean_netloc}"
+            auth_repo_url = urllib.parse.urlunparse((parsed.scheme, auth_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
     except Exception as e:
         logger.error(f"❌ URL Construction Failed: {e}")
         st.stop()
 
-    clean_env = os.environ.copy()
-    null_path = "NUL" if platform.system() == "Windows" else "/dev/null"
-    clean_env["GIT_CONFIG_GLOBAL"] = null_path
-    clean_env["GIT_CONFIG_SYSTEM"] = null_path
-    clean_env["GIT_TERMINAL_PROMPT"] = "0"
-
-    git_args = ["-c", "core.askPass=echo"] 
-
+    env_vars = os.environ.copy()
+    env_vars["GIT_TERMINAL_PROMPT"] = "0"
+    
     if not repo_path.exists():
-        # --- CLONE NEW REPO ---
-        logger.info(f"⬇️ Cloning branch '{branch_name}' from: {masked_repo_url}")
-        try:
-            cmd = ["git"] + git_args + ["clone", "--depth", "1", "--branch", branch_name, auth_repo_url, str(repo_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, env=clean_env)
-            
-            if result.returncode != 0:
-                sso_match = re.search(r"(https://github\.com/orgs/[^/]+/sso\?authorization_request=[^\s]+)", result.stderr)
-                if sso_match:
-                    sso_url = sso_match.group(1)
-                    logger.error("❌ SSO AUTHORIZATION REQUIRED")
-                    st.error("🚨 Organization requires SAML SSO Authorization.")
-                    st.markdown(f"👉 **[Click here to Authorize your Token]({sso_url})**")
-                    st.stop()
-                elif "403" in result.stderr:
-                    st.error("🚨 Authentication Failed (403).")
-                    st.info("Ensure your Token has 'repo' scope and SSO is configured.")
-                    st.stop()
-                else:
-                    safe_err = result.stderr.replace(git_token, "***").replace(git_username, "****") if git_token else result.stderr
-                    logger.error(f"❌ Git Output:\n{safe_err}")
-                    st.error(f"Git Clone Failed for branch '{branch_name}'. Check if branch exists.")
-                    st.stop()
-            else:
-                logger.info("✅ Repo cloned successfully.")
-        except Exception as e:
-            logger.error(f"❌ System Error: {e}")
+        logger.info(f"⬇️ Cloning branch '{branch_name}'...")
+        cmd = ["git", "clone", "--depth", "1", "--branch", branch_name, auth_repo_url, str(repo_path)]
+        if run_command(cmd, logger) != 0:
+            st.error("Git Clone Failed.")
             st.stop()
     else:
-        # --- UPDATE EXISTING REPO ---
-        logger.info(f"🔄 Switching/Updating to branch '{branch_name}'...")
+        logger.info(f"🔄 Fetching latest for '{branch_name}'...")
         try:
-            # 1. Update Remote URL (in case tokens changed)
-            subprocess.run(["git", "-C", str(repo_path), "remote", "set-url", "origin", auth_repo_url], 
-                         check=True, capture_output=True, env=clean_env)
-            
-            # 2. Fetch the specific branch
-            subprocess.run(["git", "-C", str(repo_path), "fetch", "origin", branch_name],
-                         check=True, capture_output=True, env=clean_env)
-
-            # 3. Checkout the branch (force reset to match remote)
-            subprocess.run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch_name}"],
-                         check=True, capture_output=True, env=clean_env)
-            
-            logger.info(f"✅ Successfully switched to '{branch_name}'.")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"❌ Git Operation failed: {e}")
-            logger.warning("⚠️ Attempting to continue with current files (might be outdated)...")
+            subprocess.run(["git", "-C", str(repo_path), "remote", "set-url", "origin", auth_repo_url], check=True, env=env_vars)
+            subprocess.run(["git", "-C", str(repo_path), "fetch", "origin", branch_name], check=True, env=env_vars)
+            subprocess.run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch_name}"], check=True, env=env_vars)
+        except Exception:
+            logger.warning("Git update failed, using existing files.")
 
 def delete_repo(repo_dir):
     path = Path(repo_dir)
     if path.exists():
-        try:
-            shutil.rmtree(path)
-            return True, "Deleted successfully."
-        except Exception as e:
-            return False, f"Error deleting: {e}"
+        shutil.rmtree(path)
+        return True, "Deleted successfully."
     return False, "Path does not exist."
 
 # --- File Operations ---
-
 def prepare_files(filename, paths, workspace, dependency_list, logger):
-    """
-    Locates the selected file, copies it to workspace, and copies dependencies.
-    """
     source = None
-    
-    # 1. Search in Main Specs Path
     main_candidate = Path(paths['specs']) / f"{filename}.yaml"
     if main_candidate.exists():
         source = main_candidate
-    
-    # 2. Search in Secondary Path (if configured)
     elif paths.get('secondary') and (Path(paths['secondary']) / f"{filename}.yaml").exists():
         source = Path(paths['secondary']) / f"{filename}.yaml"
 
     if not source:
         logger.error(f"❌ Source file '{filename}.yaml' not found.")
-        logger.info(f"ℹ️ Searched in: {paths['specs']}")
-        if paths.get('secondary'):
-            logger.info(f"ℹ️ Searched in: {paths['secondary']}")
         st.stop()
 
     workspace_path = Path(workspace)
@@ -292,44 +228,30 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     shutil.copy(source, destination)
     logger.info(f"📂 Copied main YAML to workspace: {destination.name}")
 
-    # 3. Copy Dependencies (Generic List)
     for folder in dependency_list:
         clean_folder = folder.strip()
         if not clean_folder: continue
-        
         src_folder = Path(paths['specs']) / clean_folder
         dest_folder = workspace_path / clean_folder
-        
         if src_folder.exists():
-            if dest_folder.exists():
-                shutil.rmtree(dest_folder)
+            if dest_folder.exists(): shutil.rmtree(dest_folder)
             shutil.copytree(src_folder, dest_folder)
             logger.info(f"📂 Copied dependency folder: {clean_folder}")
-        else:
-            logger.warning(f"⚠️ Dependency folder not found: {src_folder}")
-
     return destination
 
 def process_yaml_content(file_path, api_domain, logger):
-    """
-    Injects ReadMe extensions and updates server URL with user-defined domain.
-    In Refactored, versioning is handled by the branch, but we still update servers.
-    """
-    logger.info("🛠️ Injecting x-readme extensions and updating server info...")
+    logger.info("🛠️ Injecting x-readme extensions...")
     try:
         with open(file_path, "r") as f:
             data = yaml.safe_load(f)
 
-        # Inject x-readme
         if "openapi" in data:
             pos = list(data.keys()).index("openapi")
             items = list(data.items())
             items.insert(pos + 1, ("x-readme", {"explorer-enabled": False}))
             data = dict(items)
         
-        # Use user-provided domain or default
         domain = api_domain if api_domain else "example.com"
-        
         if "servers" not in data or not data["servers"]:
             data["servers"] = [{"url": f"https://{domain}", "variables": {}}]
 
@@ -342,72 +264,57 @@ def process_yaml_content(file_path, api_domain, logger):
         edited_path = file_path.parent / (file_path.stem + "_edited.yaml")
         with open(edited_path, "w") as f:
             yaml.dump(data, f, sort_keys=False)
-        logger.info(f"📝 Edited YAML saved to: {edited_path.name}")
         return edited_path
     except Exception as e:
         logger.error(f"❌ Error processing YAML: {e}")
         st.stop()
 
-# --- CALLBACK FUNCTIONS ---
+# --- CALLBACKS ---
 def clear_credentials():
-    """Clears session state variables."""
     st.session_state.readme_key = ""
     st.session_state.git_user = ""
     st.session_state.git_token = ""
-    st.session_state.gemini_key = ""
     st.session_state.logs = []
 
 def clear_logs():
-    """Clears the log history."""
     st.session_state.logs = []
 
-# --- UI Layout ---
-
+# --- MAIN ---
 def main():
+    # 1. ENSURE NODE v20 IS PRESENT
+    ensure_node_installed()
+
     st.sidebar.title("⚙️ Refactored Config")
-    
-    # --- CREDENTIAL MANAGEMENT ---
     if 'readme_key' not in st.session_state: st.session_state.readme_key = ""
     if 'gemini_key' not in st.session_state: st.session_state.gemini_key = ""
     if 'git_user' not in st.session_state: st.session_state.git_user = ""
     if 'git_token' not in st.session_state: st.session_state.git_token = ""
-    if 'repo_url' not in st.session_state: st.session_state.repo_url = ""
-    if 'last_edited_file' not in st.session_state: st.session_state.last_edited_file = None
-    
-    if 'ai_model' not in st.session_state: st.session_state.ai_model = "gemini-2.0-flash"
 
-    readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password", help="Required. Use the 'rdme_...' key from dashboard.")
+    readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
     
-    with st.sidebar.expander("🤖 AI Configuration", expanded=True):
-        gemini_key = st.text_input("Gemini API Key", key="gemini_key", type="password", help="Required for AI Analysis")
-        ai_model = st.text_input("Model Name", key="ai_model", value="gemini-2.0-flash")
-    
+    with st.sidebar.expander("🤖 AI Configuration"):
+        gemini_key = st.text_input("Gemini API Key", key="gemini_key", type="password")
+        ai_model = st.text_input("Model", key="ai_model", value="gemini-2.0-flash")
+
     st.sidebar.subheader("Git Repo Config")
-    default_cloud_path = "./cloned_repo"
-    repo_path = st.sidebar.text_input("Local Clone Path", value=default_cloud_path)
-    
-    if st.sidebar.button("🗑️ Reset / Delete Cloned Repo"):
+    repo_path = st.sidebar.text_input("Local Clone Path", value="./cloned_repo")
+    if st.sidebar.button("🗑️ Reset Repo"):
         success, msg = delete_repo(repo_path)
         if success: st.sidebar.success(msg)
-        else: st.sidebar.warning(msg)
-    
-    repo_url = st.sidebar.text_input("Git Repo HTTPS URL", key="repo_url")
-    branch_name = st.sidebar.text_input("Git Branch Source", value="main", help="Branch to pull YAML files FROM")
 
-    git_user = st.sidebar.text_input("Git Username", key="git_user", type="password", help="GitHub Handle")
-    git_token = st.sidebar.text_input("Git Token/PAT", key="git_token", type="password", help="Personal Access Token")
-
+    repo_url = st.sidebar.text_input("Git Repo URL", key="repo_url")
+    branch_name = st.sidebar.text_input("Branch Source", value="main")
+    git_user = st.sidebar.text_input("Git User", key="git_user")
+    git_token = st.sidebar.text_input("Git Token", key="git_token", type="password")
     st.sidebar.button("🔒 Clear Credentials", on_click=clear_credentials)
 
-    # --- INTERNAL PATHS & SETTINGS ---
-    st.sidebar.subheader("Internal Paths & Settings")
-    spec_rel_path = st.sidebar.text_input("Main Specs Path (relative to repo)", value="specs", help="Folder containing your main OpenAPI files.") 
-    secondary_rel_path = st.sidebar.text_input("Secondary Specs Path (Optional)", value="", help="Another folder to scan for YAML files.")
-    dep_input = st.sidebar.text_input("Dependency Folders", value="common", help="Comma-separated list of folders to copy.")
+    st.sidebar.subheader("Internal Paths")
+    spec_rel_path = st.sidebar.text_input("Main Specs Path", value="specs")
+    secondary_rel_path = st.sidebar.text_input("Secondary Path", value="")
+    dep_input = st.sidebar.text_input("Dependencies", value="common")
     dependency_list = [x.strip() for x in dep_input.split(",")]
-    api_domain = st.sidebar.text_input("API Base Domain", value="api.example.com", help="Domain to inject into servers.url")
+    api_domain = st.sidebar.text_input("API Domain", value="api.example.com")
 
-    # Path Setup
     abs_spec_path = Path(repo_path) / spec_rel_path
     paths = {"repo": repo_path, "specs": abs_spec_path}
     if secondary_rel_path:
@@ -415,8 +322,7 @@ def main():
     workspace_dir = "./temp_workspace"
 
     st.title("🚀 Refactored OpenAPI Validator")
-    
-    # --- FILE SELECTION ---
+
     col1, col2 = st.columns(2)
     with col1:
         files = []
@@ -427,178 +333,80 @@ def main():
         files = sorted(list(set(files)))
         
         if files:
-            selected_file = st.selectbox("Select OpenAPI File", files)
+            selected_file = st.selectbox("Select File", files)
         else:
-            selected_file = st.text_input("Enter Filename (e.g. 'audit')", "audit")
-            if not abs_spec_path.exists():
-                st.warning(f"⚠️ Repo not synced yet. Click 'Validate' to clone branch '{branch_name}'.")
+            selected_file = st.text_input("Filename", "audit")
 
     with col2:
-        # CHANGED: Replaced "Version" with "Target Branch" for Refactored workflow
-        target_branch = st.text_input("Target ReadMe Branch", "main", help="Where to upload this spec (e.g., 'main' or 'staging').")
+        target_branch = st.text_input("Target ReadMe Branch", "main")
 
-    # --- CHECKBOX UI ---
-    st.markdown("### 🚀 Validation Settings")
-    c_check1, c_check2, c_check3 = st.columns(3)
-    with c_check1: use_swagger = st.checkbox("Swagger CLI", value=True)
-    with c_check2: use_redocly = st.checkbox("Redocly CLI", value=True)
-    with c_check3: use_readme = st.checkbox("ReadMe CLI (v10)", value=False, help="Requires ReadMe API Key")
-    
-    st.markdown("---")
-    
+    st.markdown("### Settings")
+    c1, c2, c3 = st.columns(3)
+    use_swagger = c1.checkbox("Swagger", True)
+    use_redocly = c2.checkbox("Redocly", True)
+    use_readme = c3.checkbox("ReadMe CLI", False)
+
     c_btn1, c_btn2 = st.columns(2)
-    btn_validate_selected = c_btn1.button("🔍 Validate Selected", use_container_width=True)
-    btn_upload = c_btn2.button("🚀 Upload to ReadMe", type="primary", use_container_width=True)
+    btn_validate = c_btn1.button("🔍 Validate")
+    btn_upload = c_btn2.button("🚀 Upload", type="primary")
 
-    # --- 1. SETUP UI LAYOUT (Must happen BEFORE logic) ---
-    st.markdown("### 📜 Execution Logs")
-    
-    # Container for log text
     log_container = st.empty()
-    if st.session_state.logs:
-        log_container.code("\n".join(st.session_state.logs), language="text")
+    download_placeholder = st.empty()
 
-    # Columns for Buttons
-    col_d1, col_d2, col_d3 = st.columns([1, 1, 3])
-    
-    # Placeholder for Live Download Button (Managed by Handler)
-    with col_d1:
-        download_placeholder = st.empty()
-        # Restore download button if logs exist (persistence)
-        if st.session_state.logs:
-            unique_key = f"dl_btn_persist_{len(st.session_state.logs)}"
-            download_placeholder.download_button(
-                label="📥 Download Logs",
-                data="\n".join(st.session_state.logs),
-                file_name="openapi_upload.log",
-                mime="text/plain",
-                key=unique_key
-            )
-
-    # --- 2. EXECUTION LOGIC ---
-    if btn_validate_selected or btn_upload:
-        st.session_state.logs = [] 
-        st.session_state.last_edited_file = None
-        
+    if btn_validate or btn_upload:
+        st.session_state.logs = []
         logger = logging.getLogger("streamlit_logger")
         logger.setLevel(logging.INFO)
         if logger.handlers: logger.handlers = []
         handler = StreamlitLogHandler(log_container, download_placeholder)
-        handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
         logger.addHandler(handler)
 
-        strict_key_req = True if btn_upload else False
-        has_key = validate_env(readme_key, required=strict_key_req)
-        
+        has_key = validate_env(readme_key, required=btn_upload)
         npx_path = get_npx_path()
         if not npx_path:
-            logger.error("❌ NodeJS/npx not found.")
+            logger.error("❌ NodeJS/npx not found (even after manual install).")
             st.stop()
 
-        # GIT CALL
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
-
-        logger.info("📂 Preparing workspace...")
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
-
-        # PROCESS & STORE EDITED FILE
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         st.session_state.last_edited_file = str(edited_file)
 
-        # Validation Logic
-        if btn_upload:
-            do_swagger = True
-            do_redocly = False
-            do_readme = True
-        else:
-            do_swagger = use_swagger
-            do_redocly = use_redocly
-            do_readme = use_readme
-
-        validation_failed = False
+        failed = False
+        if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", str(edited_file)], logger) != 0: failed = True
+        if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", str(edited_file)], logger) != 0: failed = True
         
-        # 1. SWAGGER
-        if do_swagger:
-            logger.info("🔍 Running Swagger CLI...")
-            if run_command([npx_path, "--yes", "swagger-cli", "validate", str(edited_file)], logger) != 0: 
-                validation_failed = True
-        
-        # 2. REDOCLY
-        if do_redocly:
-            logger.info("🔍 Running Redocly CLI...")
-            if run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", str(edited_file)], logger) != 0: 
-                validation_failed = True
-            
-        # 3. README (Updated for Refactored v10)
-        if do_readme:
-            if has_key:
-                logger.info("🔍 Running ReadMe CLI (openapi:validate)...")
-                # V10 Command: rdme openapi:validate <file>
-                if run_command([npx_path, "--yes", "rdme", "openapi:validate", str(edited_file)], logger) != 0: 
-                    validation_failed = True
-            else:
-                logger.warning("⚠️ Skipping ReadMe CLI validation (Key missing).")
+        if use_readme and has_key:
+            if run_command([npx_path, "--yes", "rdme", "openapi:validate", str(edited_file)], logger) != 0: failed = True
 
-        # RESULT
-        if validation_failed:
-            logger.error("❌ Validation failed.")
+        if failed:
             st.error("Validation Failed.")
-            if btn_upload: st.error("Aborting upload.")
-        else:
-            logger.info("✅ Selected validations passed.")
-            if btn_upload:
-                logger.info(f"🚀 Uploading to ReadMe Branch: {target_branch}...")
-                
-                # V10 Upload Command: rdme openapi upload <file> --key <key> --branch <branch>
-                cmd = [
-                    npx_path, "--yes", "rdme", "openapi", "upload", str(edited_file),
-                    "--key", readme_key,
-                    "--branch", target_branch
-                ]
-                
-                if run_command(cmd, logger) == 0:
-                    logger.info("🎉 Upload Successful!")
-                    st.success(f"Done! Spec uploaded to branch '{target_branch}'.")
-                else:
-                    logger.error("❌ Upload failed.")
+            if btn_upload: st.stop()
+        elif btn_upload:
+            logger.info(f"🚀 Uploading to branch: {target_branch}")
+            cmd = [npx_path, "--yes", "rdme", "openapi", "upload", str(edited_file), "--key", readme_key, "--branch", target_branch]
+            if run_command(cmd, logger) == 0:
+                st.success("✅ Uploaded successfully!")
             else:
-                st.success("Validation Check Complete.")
+                st.error("❌ Upload failed.")
+        else:
+            st.success("Validation Passed.")
 
-    # --- 3. POST-EXECUTION UI RENDERING ---
-    # Now that logic is done and session_state is updated, render the buttons
-    
-    # YAML Download Button
-    with col_d2:
+    # Post-execution UI
+    with st.expander("Downloads & Tools"):
         if 'last_edited_file' in st.session_state and st.session_state.last_edited_file:
-            edited_path = Path(st.session_state.last_edited_file)
-            if edited_path.exists():
-                with open(edited_path, "r") as f:
-                    yaml_content = f.read()
-                
-                st.download_button(
-                    label="📄 Download Edited YAML",
-                    data=yaml_content,
-                    file_name=edited_path.name,
-                    mime="application/x-yaml",
-                    key="dl_yaml_btn"
-                )
-
-    # Clear Logs Button
-    with col_d3:
+            path = Path(st.session_state.last_edited_file)
+            if path.exists():
+                with open(path, "r") as f:
+                    st.download_button("Download YAML", f.read(), path.name)
         if st.session_state.logs:
-             st.button("🗑️ Clear Logs", on_click=clear_logs)
+             st.button("Clear Logs", on_click=clear_logs)
 
-    # AI Analysis Section
     if st.session_state.logs and gemini_key:
-        if st.button(f"🤖 Analyze Logs with {ai_model}"):
-            with st.spinner("Analyzing errors..."):
-                log_text = "\n".join(st.session_state.logs)
-                analysis = analyze_errors_with_ai(log_text, gemini_key, ai_model)
-                if analysis:
-                    st.markdown("### 🤖 AI Fix Suggestion")
-                    st.markdown(analysis)
-    elif st.session_state.logs and not gemini_key:
-        st.info("💡 Enter a Gemini API Key in the sidebar to unlock error analysis.")
+        if st.button("Analyze Logs with AI"):
+             with st.spinner("Analyzing..."):
+                analysis = analyze_errors_with_ai("\n".join(st.session_state.logs), gemini_key, st.session_state.ai_model)
+                st.markdown(analysis)
 
 if __name__ == "__main__":
     main()
