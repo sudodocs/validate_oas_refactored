@@ -8,6 +8,7 @@ import logging
 import sys
 import urllib.parse
 import tarfile
+import re
 from pathlib import Path
 from google import genai
 from google.genai import types
@@ -28,7 +29,10 @@ def ensure_node_installed():
     """
     node_version = "v20.11.0"
     install_dir = Path("./node_runtime")
-    node_bin_path = install_dir / f"node-{node_version-linux-x64}" / "bin"
+    
+    # --- FIXED LINE BELOW (Corrected f-string) ---
+    node_dirname = f"node-{node_version}-linux-x64"
+    node_bin_path = install_dir / node_dirname / "bin"
     
     # Check if we already have the right node version
     try:
@@ -40,9 +44,9 @@ def ensure_node_installed():
         pass
 
     # If not found or old, install it locally
-    if not (install_dir / "bin" / "node").exists():
+    if not node_bin_path.exists():
         with st.spinner(f"🔧 Installing Node.js {node_version} (Required for ReadMe v10)..."):
-            url = f"https://nodejs.org/dist/{node_version}/node-{node_version}-linux-x64.tar.xz"
+            url = f"https://nodejs.org/dist/{node_version}/{node_dirname}.tar.xz"
             
             # Download
             response = requests.get(url, stream=True)
@@ -63,18 +67,24 @@ def ensure_node_installed():
     
     # Add to PATH for this process
     # The extraction creates a folder like 'node-v20.11.0-linux-x64/bin'
-    extracted_folder = list(install_dir.glob("node-v*-linux-x64"))[0]
-    bin_path = extracted_folder / "bin"
-    
-    # Update Environment Variables for the current process
-    os.environ["PATH"] = f"{str(bin_path.absolute())}{os.pathsep}{os.environ['PATH']}"
+    # We explicitly find it to be safe
+    try:
+        extracted_folder = list(install_dir.glob("node-v*-linux-x64"))[0]
+        bin_path = extracted_folder / "bin"
+        
+        # Update Environment Variables for the current process
+        # We prepend it to ensure this version takes precedence over system version
+        os.environ["PATH"] = f"{str(bin_path.absolute())}{os.pathsep}{os.environ['PATH']}"
+    except IndexError:
+        st.error("Node.js installation failed: Extracted folder not found.")
+        st.stop()
     
     # Verify
     try:
-        ver = subprocess.check_output(["node", "-v"], text=True).strip()
-        # st.toast(f"✅ Runtime Ready: {ver}") # Optional visual confirmation
+        ver = subprocess.check_output(["node", "-v"], text=True, env=os.environ).strip()
+        # st.toast(f"✅ Runtime Ready: {ver}") # Uncomment for debugging
     except Exception as e:
-        st.error(f"Failed to set up Node runtime: {e}")
+        st.error(f"Failed to verify Node runtime: {e}")
 
 # --- Initialize Session State for Logs ---
 if 'logs' not in st.session_state:
