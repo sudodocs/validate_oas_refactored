@@ -81,14 +81,29 @@ def run_command(command_list, log_logger):
     try:
         cmd_str = " ".join(command_list)
         log_logger.info(f"Running: {cmd_str}")
+
+        # --- FIX START: Inject Conda Bin Path ---
+        # Create a copy of the current environment variables
+        env = os.environ.copy()
         
+        # If we are calling an executable by full path (like /.../.conda/bin/npx),
+        # we must add its directory to PATH so it can find sibling binaries (like 'node').
+        executable_path = command_list[0]
+        if os.path.isabs(executable_path):
+            bin_dir = os.path.dirname(executable_path)
+            # Prepend this bin directory to the system PATH
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        # --- FIX END ---
+
         process = subprocess.Popen(
             command_list,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            encoding='utf-8'
+            encoding='utf-8',
+            env=env  # <--- Important: Pass the modified environment
         )
+        
         for line in process.stdout:
             clean = line.strip()
             if clean:
