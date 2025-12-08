@@ -2,14 +2,19 @@ name: streamlit-refactored
 channels:
   - conda-forge
 dependencies:
+  # System
   - git
   - nodejs=20
   - npm
+  
+  # Core Python (Install via Conda for stability)
   - python=3.10
+  - pyyaml
+  - requests
+  - streamlit
+  
+  # Pip-only packages
   - pip
   - pip:
-    - streamlit
-    - requests
-    - PyYAML
     - python-dotenv
     - google-genai
