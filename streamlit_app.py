@@ -164,7 +164,7 @@ def delete_repo(repo_dir):
             return False, f"Error: {e}"
     return False, "Path does not exist."
 
-# --- File Ops (UPDATED TO PRESERVE STRUCTURE) ---
+# --- File Ops (RESOLVE FIX) ---
 def prepare_files(filename, paths, workspace, dependency_list, logger):
     source = None
     
@@ -183,22 +183,29 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     dest_dir = Path(workspace)
     dest_dir.mkdir(parents=True, exist_ok=True)
     
-    # --- NEW LOGIC: Preserve Directory Structure ---
-    # Attempt to calculate relative path from the Main Spec root
-    # e.g. logical_metadata/field_value.yaml
+    # --- NESTING LOGIC WITH RESOLVE ---
     try:
-        rel_path = source.relative_to(paths['specs'])
+        # Resolve paths to handle symlinks and absolute/relative mismatches
+        specs_resolved = paths['specs'].resolve()
+        source_resolved = source.resolve()
+        
+        # Calculate relative path (e.g., logical_metadata/field_value.yaml)
+        rel_path = source_resolved.relative_to(specs_resolved)
         destination = dest_dir / rel_path
-        # Ensure parent subdirectory exists in workspace
+        
+        # Create the nested folder structure in workspace
         destination.parent.mkdir(parents=True, exist_ok=True)
+        
     except ValueError:
-        # Fallback if file is outside main spec path (should rarely happen given your config)
+        # Fallback if file is outside main spec path structure
+        logger.warning(f"⚠️ Could not nest file. Flattening. (Source: {source}, Root: {paths['specs']})")
         destination = dest_dir / source.name
 
     shutil.copy(source, destination)
+    # Log the relative path to confirm where it ended up
     logger.info(f"📂 Copied YAML to workspace: {destination.relative_to(dest_dir)}")
 
-    # Copy Dependencies (common, etc.)
+    # Copy Dependencies
     for folder in dependency_list:
         clean = folder.strip()
         if not clean: continue
@@ -234,7 +241,7 @@ def process_yaml_content(file_path, version, api_domain, logger):
         data["servers"][0]["variables"]["base-url"] = {"default": domain}
         data["servers"][0]["variables"]["protocol"] = {"default": "https"}
 
-        # Save edited file in the SAME directory to maintain relative refs
+        # Save edited file in SAME directory to maintain relative refs
         edited_path = file_path.parent / (file_path.stem + "_edited.yaml")
         with open(edited_path, "w") as f: yaml.dump(data, f, sort_keys=False)
         logger.info(f"📝 Edited YAML saved: {edited_path.name}")
@@ -289,17 +296,12 @@ def get_api_id(api_name, version, api_key, base_url, logger):
     return None, None
 
 def create_new_api_via_requests(file_path, version, api_key, base_url, logger):
-    """
-    Directly uploads a new spec to ReadMe via requests to bypass CLI prompts.
-    """
     logger.info("📤 Creating NEW API definition directly via API...")
     headers = {"Authorization": f"Basic {api_key}", "x-readme-version": version}
-    
     try:
         with open(file_path, 'rb') as f:
             files = {'spec': (file_path.name, f)}
             res = requests.post(f"{base_url}/api-specification", headers=headers, files=files)
-            
         if res.status_code in [200, 201]:
             new_id = res.json().get("_id")
             logger.info(f"✅ Successfully Created! ID: {new_id}")
@@ -432,8 +434,7 @@ def main():
         do_rm = True if b_up else use_rd
         fail = False
         
-        # Calculate Relative Path for Validation commands
-        # We need to run validation relative to the workspace root but pointing to the nested file
+        # Calculate Relative Path based on where the file ended up (Flat or Nested)
         target_relative_to_ws = target.relative_to(abs_workspace_path)
 
         if do_s:
