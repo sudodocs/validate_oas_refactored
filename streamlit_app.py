@@ -164,7 +164,7 @@ def delete_repo(repo_dir):
             return False, f"Error: {e}"
     return False, "Path does not exist."
 
-# --- File Ops (RESOLVE FIX) ---
+# --- File Ops (FIXED NESTING) ---
 def prepare_files(filename, paths, workspace, dependency_list, logger):
     source = None
     
@@ -183,26 +183,31 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     dest_dir = Path(workspace)
     dest_dir.mkdir(parents=True, exist_ok=True)
     
-    # --- NESTING LOGIC WITH RESOLVE ---
+    # --- ROBUST NESTING LOGIC (Using os.path.relpath) ---
     try:
-        # Resolve paths to handle symlinks and absolute/relative mismatches
-        specs_resolved = paths['specs'].resolve()
-        source_resolved = source.resolve()
+        specs_root = str(paths['specs'].resolve())
+        source_abs = str(source.resolve())
         
-        # Calculate relative path (e.g., logical_metadata/field_value.yaml)
-        rel_path = source_resolved.relative_to(specs_resolved)
-        destination = dest_dir / rel_path
+        # Calculate relative path string (e.g. "logical_metadata/field_value.yaml")
+        # os.path.relpath is safer than pathlib for mounts/symlinks
+        rel_path_str = os.path.relpath(source_abs, specs_root)
         
-        # Create the nested folder structure in workspace
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        
-    except ValueError:
-        # Fallback if file is outside main spec path structure
-        logger.warning(f"⚠️ Could not nest file. Flattening. (Source: {source}, Root: {paths['specs']})")
+        # Security check: if it starts with '..', it's outside the spec root. Flatten it.
+        if rel_path_str.startswith(".."):
+             logger.warning(f"⚠️ File is outside spec root. Flattening: {rel_path_str}")
+             destination = dest_dir / source.name
+        else:
+             destination = dest_dir / rel_path_str
+             # Create the nested directory (e.g. temp_workspace/logical_metadata/)
+             destination.parent.mkdir(parents=True, exist_ok=True)
+             
+    except Exception as e:
+        logger.warning(f"⚠️ Nesting calculation failed ({e}). Flattening.")
         destination = dest_dir / source.name
 
     shutil.copy(source, destination)
-    # Log the relative path to confirm where it ended up
+    
+    # Log the relative path so we can VERIFY it nested
     logger.info(f"📂 Copied YAML to workspace: {destination.relative_to(dest_dir)}")
 
     # Copy Dependencies
@@ -435,7 +440,11 @@ def main():
         fail = False
         
         # Calculate Relative Path based on where the file ended up (Flat or Nested)
-        target_relative_to_ws = target.relative_to(abs_workspace_path)
+        try:
+             target_relative_to_ws = target.relative_to(abs_workspace_path)
+        except ValueError:
+             # Fallback if somehow path mismatch
+             target_relative_to_ws = target.name
 
         if do_s:
             logger.info("🔍 Running Swagger...")
