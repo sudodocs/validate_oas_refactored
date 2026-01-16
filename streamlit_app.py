@@ -14,7 +14,7 @@ from google import genai
 
 # Page Config
 st.set_page_config(
-    page_title="Refactored OpenAPI Validator (v10)",
+    page_title="Refactored OpenAPI Validator",
     page_icon="📘",
     layout="wide"
 )
@@ -113,7 +113,7 @@ def get_api_id_smart(api_title, api_key, logger):
         def tokenize(text): return set(re.findall(r'\w+', text.lower()))
         target_tokens = tokenize(api_title)
         
-        # Fetch all APIs (Assuming <100 for simplicity, pagination can be added)
+        # Fetch all APIs
         res = requests.get(f"{base_url}/api-specification", headers=headers, params={"perPage": 100})
         
         if res.status_code == 200:
@@ -179,18 +179,14 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     workspace_path = Path(workspace)
     workspace_path.mkdir(parents=True, exist_ok=True)
     
-    # --- START FIX: Preserve directory structure ---
+    # --- FIX: Preserve directory structure ---
     try:
         # Calculate where the file is relative to the "specs" root
-        # e.g., source: .../specs/logical_metadata/field_value.yaml -> rel_path: logical_metadata/field_value.yaml
         rel_path = source.resolve().relative_to(paths['specs'].resolve())
         destination = workspace_path / rel_path
-        # Ensure the subdirectory (e.g., logical_metadata) exists in workspace
         destination.parent.mkdir(parents=True, exist_ok=True)
     except ValueError:
-        # Fallback if file is outside specs (flattening)
         destination = workspace_path / source.name
-    # --- END FIX ---
 
     shutil.copy(source, destination)
     logger.info(f"📂 Copied YAML to workspace: {destination.relative_to(workspace_path)}")
@@ -223,7 +219,7 @@ def process_yaml_content(file_path, api_domain, logger):
         data["servers"][0]["variables"]["base-url"] = {"default": domain}
         data["servers"][0]["variables"]["protocol"] = {"default": "https"}
 
-        # Save edited file in SAME directory to preserve relative paths
+        # Save edited file in SAME directory
         edited_path = file_path.parent / (file_path.stem + "_edited.yaml")
         with open(edited_path, "w") as f: yaml.dump(data, f, sort_keys=False)
         return edited_path
@@ -248,11 +244,8 @@ def main():
     if 'gemini_key' not in st.session_state: st.session_state.gemini_key = ""
     
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
+    gemini_key = st.sidebar.text_input("Gemini API Key", key="gemini_key", type="password")
     
-    with st.sidebar.expander("🤖 AI Configuration"):
-        gemini_key = st.text_input("Gemini API Key", key="gemini_key", type="password")
-        ai_model = st.text_input("Model", key="ai_model", value="gemini-2.0-flash")
-
     st.sidebar.subheader("Git Repo Config")
     repo_path = st.sidebar.text_input("Local Clone Path", value="./cloned_repo")
     if st.sidebar.button("🗑️ Reset Repo"):
@@ -315,68 +308,61 @@ def main():
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
-        st.session_state.last_edited_file = str(edited_file)
-
-        # FIX: Resolve relative path for CLI (so CLI runs inside workspace)
-        abs_workspace = Path(workspace_dir).resolve()
-        try:
-            rel_file_path = edited_file.resolve().relative_to(abs_workspace)
-        except ValueError:
-            rel_file_path = edited_file.name
+        
+        # --- CRITICAL FIX FOR PATHS ---
+        # Instead of running from workspace_dir, we run from the PARENT FOLDER of the edited file.
+        # This aligns CWD with the file location, so '../common' works correctly.
+        abs_execution_dir = edited_file.parent.resolve()
+        target_filename = edited_file.name
 
         failed = False
-        if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", str(rel_file_path)], logger, cwd=abs_workspace) != 0: failed = True
-        if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", str(rel_file_path)], logger, cwd=abs_workspace) != 0: failed = True
-        if use_readme and has_key and run_command([npx_path, "--yes", "rdme", "openapi:validate", str(rel_file_path)], logger, cwd=abs_workspace) != 0: failed = True
+        if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
+        if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
+        if use_readme and has_key and run_command([npx_path, "--yes", "rdme", "openapi:validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
 
         if failed:
             st.error("Validation Failed.")
             if btn_upload: st.stop()
         elif btn_upload:
-            # --- START SMART UPLOAD LOGIC ---
             logger.info("🚀 Preparing Upload...")
             
-            # 1. Read Title
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # 2. Find ID (Smart Match)
+            # Smart Match Logic
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
             
-            # 3. Auto-Correct Title (Updates the FILE before upload)
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            cmd = [npx_path, "--yes", "rdme", "openapi", "upload", str(rel_file_path), "--key", readme_key, "--branch", target_branch]
+            cmd = [npx_path, "--yes", "rdme", "openapi", "upload", target_filename, "--key", readme_key, "--branch", target_branch]
             
-            # 4. Inject ID if found
             if api_id:
                 cmd.extend(["--id", api_id])
             else:
                 logger.warning("⚠️ No matching ID found. 'rdme' will attempt to create a NEW API.")
 
-            if run_command(cmd, logger, cwd=abs_workspace) == 0:
+            if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
                 st.success("✅ Uploaded successfully!")
             else:
                 st.error("❌ Upload failed.")
-            # --- END SMART UPLOAD LOGIC ---
         else:
             st.success("Validation Passed.")
 
     with st.expander("Downloads & Tools"):
-        if 'last_edited_file' in st.session_state and st.session_state.last_edited_file:
-            path = Path(st.session_state.last_edited_file)
-            if path.exists():
-                with open(path, "r") as f: st.download_button("Download YAML", f.read(), path.name)
+        if 'last_edited_file' in st.session_state: # Fixed check
+             path = Path(st.session_state.last_edited_file) # Fixed access
+             if path.exists():
+                 with open(path, "r") as f: st.download_button("Download YAML", f.read(), path.name)
         if st.session_state.logs: st.button("Clear Logs", on_click=clear_logs)
 
     if st.session_state.logs and gemini_key:
         if st.button("Analyze Logs with AI"):
              with st.spinner("Analyzing..."):
-                analysis = analyze_errors_with_ai("\n".join(st.session_state.logs), gemini_key, st.session_state.ai_model)
+                analysis = analyze_errors_with_ai("\n".join(st.session_state.logs), gemini_key, "gemini-2.0-flash")
                 st.markdown(analysis)
 
 if __name__ == "__main__": main()
