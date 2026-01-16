@@ -3,3 +3,5 @@ requests
 PyYAML
 python-dotenv
 google-genai
+requests
+google-generativeai
