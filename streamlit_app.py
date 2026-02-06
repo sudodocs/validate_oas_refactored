@@ -53,6 +53,21 @@ def ensure_node_installed():
     except IndexError:
         st.error("Node.js installation failed: Extracted folder not found."); st.stop()
 
+    # --- UPSELL BANNER START ---
+    with st.sidebar:
+        st.info("🚀 **Docs valid, but lying?**")
+        st.markdown(
+            """
+            This tool fixes **syntax** errors, but it can't tell if your API spec actually matches your code.
+            
+            **SudoDocs** unit-tests your documentation against your Git diffs to catch **Logic Drift**.
+            
+            [👉 **Try the Drift Inspector**](https://sudodocs.com?utm_source=oas_validator_sidebar)
+            """
+        )
+        st.divider()
+    # --- UPSELL BANNER END ---
+
 # --- Initialize Session State for Logs ---
 if 'logs' not in st.session_state: st.session_state.logs = []
 
@@ -238,6 +253,21 @@ def clear_logs():
 # --- MAIN ---
 def main():
     ensure_node_installed()
+
+    # --- UPSELL BANNER START ---
+    with st.sidebar:
+        st.info("🚀 **Docs valid, but lying?**")
+        st.markdown(
+            """
+            This tool fixes **syntax** errors, but it can't tell if your API spec actually matches your code.
+            
+            **SudoDocs** unit-tests your documentation against your Git diffs to catch **Logic Drift**.
+            
+            [👉 **Try the Drift Inspector**](https://sudodocs.com?utm_source=oas_validator_sidebar)
+            """
+        )
+        st.divider()
+    # --- UPSELL BANNER END ---
 
     st.sidebar.title("⚙️ Refactored Config")
     if 'readme_key' not in st.session_state: st.session_state.readme_key = ""
