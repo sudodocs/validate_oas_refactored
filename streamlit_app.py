@@ -221,6 +221,9 @@ def main():
 
     st.sidebar.title("⚙️ Refactored Config")
     
+    # Session State for File Persistence
+    if 'current_edited_file' not in st.session_state: st.session_state.current_edited_file = None
+
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
     gemini_key = st.sidebar.text_input("Gemini API Key", key="gemini_key", type="password")
     
@@ -247,7 +250,7 @@ def main():
     if secondary_rel_path: paths["secondary"] = Path(repo_path) / secondary_rel_path
     workspace_dir = "./temp_workspace"
 
-    st.title("SudoDocs OAS Validator")
+    st.title("🚀 Refactored OpenAPI Validator")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -272,6 +275,7 @@ def main():
     download_placeholder = st.empty()
     dl_container = st.container()
 
+    # --- EXECUTION LOGIC ---
     if btn_validate or btn_upload:
         st.session_state.logs = []
         logger = logging.getLogger("streamlit_logger")
@@ -284,59 +288,78 @@ def main():
         npx_path = get_npx_path()
         if not npx_path: logger.error("❌ NodeJS/npx not found."); st.stop()
 
+        # 1. SETUP & PREPARE FILES
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
+        
+        # 2. PROCESS & SAVE EDITED FILE
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # --- SHOW DOWNLOAD BUTTON IMMEDIATELY ---
+        # Store in session state to ensure persistence
+        st.session_state.current_edited_file = str(edited_file)
+
+        # 3. DOWNLOAD BUTTON (Read from disk immediately)
         try:
-            with open(edited_file, "r") as f:
-                yaml_content = f.read()
+            with open(edited_file, "r") as f: yaml_content = f.read()
             dl_container.download_button(
                 label="📥 Download Edited YAML",
                 data=yaml_content,
                 file_name=edited_file.name,
                 mime="application/x-yaml"
             )
-        except Exception as e:
-            logger.error(f"Could not prepare download: {e}")
+        except Exception as e: logger.error(f"Download prep failed: {e}")
 
-        # Resolve paths
+        # 4. VALIDATION
         abs_execution_dir = edited_file.parent.resolve()
-        target_filename = edited_file.name
+        target_filename = f"./{edited_file.name}" # Explicit local path
 
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
-        if use_readme and has_key and run_command([npx_path, "--yes", "rdme", "openapi:validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
+        if use_readme and has_key and run_command([npx_path, "--yes", "rdme@latest", "openapi:validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
 
         if failed:
             st.error("Validation Failed.")
             if btn_upload: st.stop()
+        
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
+            
+            # Re-read the file from disk to ensure we have the latest version for analysis
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
+            # Smart Match Logic
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
+            
+            # Auto-Correct Title (Write back to disk if needed)
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- CORRECT COMMAND: NO 'upload' keyword ---
-            cmd = [npx_path, "--yes", "rdme", "openapi", target_filename, "--key", readme_key, "--branch", target_branch]
+            # --- UPLOAD EXECUTION ---
             
-            if api_id:
-                cmd.extend(["--id", api_id])
-            else:
-                logger.warning("⚠️ No matching ID found. 'rdme' will attempt to create a NEW API.")
-
+            # Method A: CLI (rdme@latest)
+            logger.info("Attempting CLI Upload...")
+            cmd = [npx_path, "--yes", "rdme@latest", "openapi", target_filename, "--key", readme_key]
+            if api_id: cmd.extend(["--id", api_id])
+            
+            cli_success = False
             if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
-                st.success("✅ Uploaded successfully!")
+                cli_success = True
+            
+            # Method B: Python Fallback (If CLI fails)
+            if not cli_success:
+                logger.warning("⚠️ CLI Upload failed. Triggering Python fallback...")
+                # Pass the Path object 'edited_file' directly
+                if python_direct_upload(edited_file, readme_key, api_id, target_branch, logger):
+                    st.success("✅ Uploaded successfully (via Python)!")
+                else:
+                    st.error("❌ All upload methods failed.")
             else:
-                st.error("❌ Upload failed.")
+                st.success("✅ Uploaded successfully (via CLI)!")
         else:
             st.success("Validation Passed.")
 
