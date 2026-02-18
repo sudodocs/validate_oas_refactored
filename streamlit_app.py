@@ -123,8 +123,8 @@ def get_api_id_smart(api_title, api_key, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
-# --- NEW: ROBUST PYTHON UPLOAD (Bypasses CLI) ---
-def upload_to_readme_via_python(file_path, api_key, api_id, logger):
+# --- NEW: PYTHON DIRECT UPLOAD ---
+def python_direct_upload(file_path, api_key, api_id, logger):
     """
     Directly uploads the file using Python requests, bypassing flaky CLI/Node issues.
     """
@@ -150,13 +150,13 @@ def upload_to_readme_via_python(file_path, api_key, api_id, logger):
 
             if res.status_code in [200, 201]:
                 logger.info(f"✅ Upload Success! Status: {res.status_code}")
-                return True, res.json()
+                return True
             else:
                 logger.error(f"❌ Upload Failed: {res.status_code} - {res.text}")
-                return False, res.text
+                return False
     except Exception as e:
         logger.error(f"❌ Upload Exception: {e}")
-        return False, str(e)
+        return False
 
 # --- Git Logic ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
@@ -241,12 +241,24 @@ def process_yaml_content(file_path, api_domain, logger):
         return edited_path
     except Exception as e: logger.error(f"❌ YAML Error: {e}"); st.stop()
 
+# --- CALLBACKS ---
+def clear_credentials():
+    st.session_state.readme_key = ""
+    st.session_state.git_user = ""
+    st.session_state.git_token = ""
+    st.session_state.logs = []
+
+def clear_logs(): st.session_state.logs = []
+
 # --- MAIN ---
 def main():
     ensure_node_installed()
 
     st.sidebar.title("⚙️ Refactored Config")
     
+    # Session State for File Persistence
+    if 'current_edited_file' not in st.session_state: st.session_state.current_edited_file = None
+
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
     gemini_key = st.sidebar.text_input("Gemini API Key", key="gemini_key", type="password")
     
@@ -314,7 +326,10 @@ def main():
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # --- SHOW DOWNLOAD BUTTON IMMEDIATELY ---
+        # Store in session state
+        st.session_state.current_edited_file = str(edited_file)
+
+        # Show Download Button
         try:
             with open(edited_file, "r") as f: yaml_content = f.read()
             dl_container.download_button(
@@ -325,9 +340,9 @@ def main():
             )
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
-        # Resolve paths
+        # Paths
         abs_execution_dir = edited_file.parent.resolve()
-        target_filename = f"./{edited_file.name}" # Strict local path
+        target_filename = f"./{edited_file.name}"
 
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -337,30 +352,42 @@ def main():
         if failed:
             st.error("Validation Failed.")
             if btn_upload: st.stop()
+        
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
+            
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
+            
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- UPLOAD VIA PYTHON (Bypass CLI) ---
-            success, response = upload_to_readme_via_python(edited_file, readme_key, api_id, logger)
+            # --- ATTEMPT 1: CLI UPLOAD ---
+            cmd = [npx_path, "--yes", "rdme@latest", "openapi", target_filename, "--key", readme_key]
+            if api_id: cmd.extend(["--id", api_id])
             
-            if success:
-                st.success("✅ Uploaded successfully!")
+            cli_success = False
+            if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
+                cli_success = True
+            
+            # --- ATTEMPT 2: PYTHON FALLBACK ---
+            if not cli_success:
+                logger.warning("⚠️ CLI Upload failed. Triggering Python fallback...")
+                if python_direct_upload(edited_file, readme_key, api_id, logger):
+                    st.success("✅ Uploaded successfully (via Python)!")
+                else:
+                    st.error("❌ All upload methods failed.")
             else:
-                st.error(f"❌ Upload failed: {response}")
-
+                st.success("✅ Uploaded successfully (via CLI)!")
         else:
             st.success("Validation Passed.")
 
-    if st.session_state.logs and st.button("Clear Logs"): st.session_state.logs = []
+    if st.session_state.logs and st.button("Clear Logs"): clear_logs()
 
     if st.session_state.logs and gemini_key:
         if st.button("Analyze Logs with AI"):
