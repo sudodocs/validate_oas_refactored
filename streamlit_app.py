@@ -14,8 +14,8 @@ from google import genai
 
 # Page Config
 st.set_page_config(
-    page_title="SudoDocs OAS Validator",
-    page_icon="https://sudodocs.com/favicon.ico",
+    page_title="Refactored OpenAPI Validator",
+    page_icon="📘",
     layout="wide"
 )
 
@@ -123,6 +123,41 @@ def get_api_id_smart(api_title, api_key, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
+# --- NEW: ROBUST PYTHON UPLOAD (Bypasses CLI) ---
+def upload_to_readme_via_python(file_path, api_key, api_id, logger):
+    """
+    Directly uploads the file using Python requests, bypassing flaky CLI/Node issues.
+    """
+    logger.info("🚀 Starting Direct Python Upload...")
+    base_url = "https://dash.readme.com/api/v1/api-specification"
+    
+    # Basic Auth with API Key (password is empty string)
+    auth = (api_key, "")
+    
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'spec': (file_path.name, f)}
+            
+            if api_id:
+                # UPDATE Existing API (PUT)
+                url = f"{base_url}/{api_id}"
+                logger.info(f"📤 PUT {url}")
+                res = requests.put(url, auth=auth, files=files)
+            else:
+                # CREATE New API (POST)
+                logger.info(f"📤 POST {base_url}")
+                res = requests.post(base_url, auth=auth, files=files)
+
+            if res.status_code in [200, 201]:
+                logger.info(f"✅ Upload Success! Status: {res.status_code}")
+                return True, res.json()
+            else:
+                logger.error(f"❌ Upload Failed: {res.status_code} - {res.text}")
+                return False, res.text
+    except Exception as e:
+        logger.error(f"❌ Upload Exception: {e}")
+        return False, str(e)
+
 # --- Git Logic ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
     logger.info(f"🚀 Starting Git Operation for branch: {branch_name}...")
@@ -206,24 +241,12 @@ def process_yaml_content(file_path, api_domain, logger):
         return edited_path
     except Exception as e: logger.error(f"❌ YAML Error: {e}"); st.stop()
 
-# --- CALLBACKS ---
-def clear_credentials():
-    st.session_state.readme_key = ""
-    st.session_state.git_user = ""
-    st.session_state.git_token = ""
-    st.session_state.logs = []
-
-def clear_logs(): st.session_state.logs = []
-
 # --- MAIN ---
 def main():
     ensure_node_installed()
 
     st.sidebar.title("⚙️ Refactored Config")
     
-    # Session State for File Persistence
-    if 'current_edited_file' not in st.session_state: st.session_state.current_edited_file = None
-
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
     gemini_key = st.sidebar.text_input("Gemini API Key", key="gemini_key", type="password")
     
@@ -250,7 +273,7 @@ def main():
     if secondary_rel_path: paths["secondary"] = Path(repo_path) / secondary_rel_path
     workspace_dir = "./temp_workspace"
 
-    st.title("SudoDocs OAS Validator")
+    st.title("🚀 Refactored OpenAPI Validator")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -291,10 +314,7 @@ def main():
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # Store in session state
-        st.session_state.current_edited_file = str(edited_file)
-
-        # Show Download Button
+        # --- SHOW DOWNLOAD BUTTON IMMEDIATELY ---
         try:
             with open(edited_file, "r") as f: yaml_content = f.read()
             dl_container.download_button(
@@ -305,7 +325,7 @@ def main():
             )
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
-        # Paths
+        # Resolve paths
         abs_execution_dir = edited_file.parent.resolve()
         target_filename = f"./{edited_file.name}" # Strict local path
 
@@ -317,34 +337,30 @@ def main():
         if failed:
             st.error("Validation Failed.")
             if btn_upload: st.stop()
-        
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
-            
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
-            
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- CORRECT UPLOAD COMMAND (rdme openapi ...) ---
-            cmd = [npx_path, "--yes", "rdme@latest", "openapi", target_filename, "--key", readme_key]
+            # --- UPLOAD VIA PYTHON (Bypass CLI) ---
+            success, response = upload_to_readme_via_python(edited_file, readme_key, api_id, logger)
             
-            if api_id: cmd.extend(["--id", api_id])
-            
-            if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
+            if success:
                 st.success("✅ Uploaded successfully!")
             else:
-                st.error("❌ Upload failed.")
+                st.error(f"❌ Upload failed: {response}")
+
         else:
             st.success("Validation Passed.")
 
-    if st.session_state.logs and st.button("Clear Logs"): clear_logs()
+    if st.session_state.logs and st.button("Clear Logs"): st.session_state.logs = []
 
     if st.session_state.logs and gemini_key:
         if st.button("Analyze Logs with AI"):
