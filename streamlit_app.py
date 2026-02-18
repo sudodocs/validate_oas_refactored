@@ -588,24 +588,10 @@ def clear_logs():
 def main():
     ensure_node_installed()
 
-    # --- UPSELL BANNER START ---
-    with st.sidebar:
-        st.info("🚀 **Docs valid, but lying?**")
-        st.markdown(
-            """
-            This tool fixes **syntax** errors, but it can't tell if your API spec actually matches your code.
-            
-            **SudoDocs** unit-tests your documentation against your Git diffs to catch **Logic Drift**.
-            
-            [👉 **Try the Drift Inspector**](https://sudodocs.com?utm_source=oas_validator_sidebar)
-            """
-        )
-        st.divider()
-    # --- UPSELL BANNER END ---
-
     st.sidebar.title("⚙️ Refactored Config")
-    if 'readme_key' not in st.session_state: st.session_state.readme_key = ""
-    if 'gemini_key' not in st.session_state: st.session_state.gemini_key = ""
+    
+    # [EDIT 1] REMOVED manual session_state initialization to prevent DuplicateKey errors.
+    # Streamlit handles this automatically when 'key=' is used in widgets.
     
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
     gemini_key = st.sidebar.text_input("Gemini API Key", key="gemini_key", type="password")
@@ -633,7 +619,7 @@ def main():
     if secondary_rel_path: paths["secondary"] = Path(repo_path) / secondary_rel_path
     workspace_dir = "./temp_workspace"
 
-    st.title("🚀 SudoDocs OAS Validator")
+    st.title("🚀 Refactored OpenAPI Validator")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -654,15 +640,16 @@ def main():
     btn_validate = c_btn1.button("🔍 Validate")
     btn_upload = c_btn2.button("🚀 Upload", type="primary")
 
+    # [EDIT 2] Log container and Download placeholder defined here
     log_container = st.empty()
-    download_placeholder = st.empty()
+    dl_container = st.container() 
 
     if btn_validate or btn_upload:
         st.session_state.logs = []
         logger = logging.getLogger("streamlit_logger")
         logger.setLevel(logging.INFO)
         if logger.handlers: logger.handlers = []
-        handler = StreamlitLogHandler(log_container, download_placeholder)
+        handler = StreamlitLogHandler(log_container)
         logger.addHandler(handler)
 
         has_key = validate_env(readme_key, required=btn_upload)
@@ -673,9 +660,18 @@ def main():
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # --- CRITICAL FIX FOR PATHS ---
-        # Instead of running from workspace_dir, we run from the PARENT FOLDER of the edited file.
-        # This aligns CWD with the file location, so '../common' works correctly.
+        # [EDIT 3] FORCE DISPLAY DOWNLOAD BUTTON IMMEDIATELY
+        try:
+            with open(edited_file, "r") as f: yaml_content = f.read()
+            dl_container.download_button(
+                label="📥 Download Edited YAML",
+                data=yaml_content,
+                file_name=edited_file.name,
+                mime="application/x-yaml"
+            )
+        except Exception as e: logger.error(f"Download prep failed: {e}")
+
+        # Resolve paths for CLI execution
         abs_execution_dir = edited_file.parent.resolve()
         target_filename = edited_file.name
 
@@ -689,25 +685,21 @@ def main():
             if btn_upload: st.stop()
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
-            
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # Smart Match Logic
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
-            
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            cmd = [npx_path, "--yes", "rdme", "openapi", "upload", target_filename, "--key", readme_key, "--branch", target_branch]
+            # [EDIT 4] CORRECTED UPLOAD COMMAND (Removed 'upload' word)
+            cmd = [npx_path, "--yes", "rdme", "openapi", target_filename, "--key", readme_key, "--branch", target_branch]
             
-            if api_id:
-                cmd.extend(["--id", api_id])
-            else:
-                logger.warning("⚠️ No matching ID found. 'rdme' will attempt to create a NEW API.")
+            if api_id: cmd.extend(["--id", api_id])
+            else: logger.warning("⚠️ No matching ID found. 'rdme' will attempt to create a NEW API.")
 
             if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
                 st.success("✅ Uploaded successfully!")
@@ -716,12 +708,7 @@ def main():
         else:
             st.success("Validation Passed.")
 
-    with st.expander("Downloads & Tools"):
-        if 'last_edited_file' in st.session_state: # Fixed check
-             path = Path(st.session_state.last_edited_file) # Fixed access
-             if path.exists():
-                 with open(path, "r") as f: st.download_button("Download YAML", f.read(), path.name)
-        if st.session_state.logs: st.button("Clear Logs", on_click=clear_logs)
+    if st.session_state.logs and st.button("Clear Logs"): clear_logs()
 
     if st.session_state.logs and gemini_key:
         if st.button("Analyze Logs with AI"):
