@@ -250,7 +250,7 @@ def main():
     if secondary_rel_path: paths["secondary"] = Path(repo_path) / secondary_rel_path
     workspace_dir = "./temp_workspace"
 
-    st.title("🚀 Refactored OpenAPI Validator")
+    st.title("SudoDocs OAS Validator")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -275,7 +275,6 @@ def main():
     download_placeholder = st.empty()
     dl_container = st.container()
 
-    # --- EXECUTION LOGIC ---
     if btn_validate or btn_upload:
         st.session_state.logs = []
         logger = logging.getLogger("streamlit_logger")
@@ -288,17 +287,14 @@ def main():
         npx_path = get_npx_path()
         if not npx_path: logger.error("❌ NodeJS/npx not found."); st.stop()
 
-        # 1. SETUP & PREPARE FILES
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
-        
-        # 2. PROCESS & SAVE EDITED FILE
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # Store in session state to ensure persistence
+        # Store in session state
         st.session_state.current_edited_file = str(edited_file)
 
-        # 3. DOWNLOAD BUTTON (Read from disk immediately)
+        # Show Download Button
         try:
             with open(edited_file, "r") as f: yaml_content = f.read()
             dl_container.download_button(
@@ -309,9 +305,9 @@ def main():
             )
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
-        # 4. VALIDATION
+        # Paths
         abs_execution_dir = edited_file.parent.resolve()
-        target_filename = f"./{edited_file.name}" # Explicit local path
+        target_filename = f"./{edited_file.name}" # Strict local path
 
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -325,41 +321,26 @@ def main():
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
             
-            # Re-read the file from disk to ensure we have the latest version for analysis
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # Smart Match Logic
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
             
-            # Auto-Correct Title (Write back to disk if needed)
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- UPLOAD EXECUTION ---
-            
-            # Method A: CLI (rdme@latest)
-            logger.info("Attempting CLI Upload...")
+            # --- CORRECT UPLOAD COMMAND (rdme openapi ...) ---
             cmd = [npx_path, "--yes", "rdme@latest", "openapi", target_filename, "--key", readme_key]
+            
             if api_id: cmd.extend(["--id", api_id])
             
-            cli_success = False
             if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
-                cli_success = True
-            
-            # Method B: Python Fallback (If CLI fails)
-            if not cli_success:
-                logger.warning("⚠️ CLI Upload failed. Triggering Python fallback...")
-                # Pass the Path object 'edited_file' directly
-                if python_direct_upload(edited_file, readme_key, api_id, target_branch, logger):
-                    st.success("✅ Uploaded successfully (via Python)!")
-                else:
-                    st.error("❌ All upload methods failed.")
+                st.success("✅ Uploaded successfully!")
             else:
-                st.success("✅ Uploaded successfully (via CLI)!")
+                st.error("❌ Upload failed.")
         else:
             st.success("Validation Passed.")
 
