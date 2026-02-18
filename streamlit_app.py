@@ -123,11 +123,13 @@ def get_api_id_smart(api_title, api_key, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
-# --- PYTHON DIRECT UPLOAD (Smart Logic) ---
+# --- PYTHON DIRECT UPLOAD ---
 def python_direct_upload(file_path, api_key, api_id, logger):
     """
-    If ID found -> PUT (Update)
-    If ID missing -> POST (Create New) with Warning
+    Directly uploads the file using Python requests.
+    Logic:
+    - If ID exists: PUT (Update)
+    - If ID missing: POST (Create New) with Warning
     """
     logger.info("🚀 Starting Direct Python Upload...")
     base_url = "https://dash.readme.com/api/v1/api-specification"
@@ -328,6 +330,17 @@ def main():
         # Store for download
         st.session_state.current_edited_file = str(edited_file)
 
+        # Show Download Button
+        try:
+            with open(edited_file, "r") as f: yaml_content = f.read()
+            dl_container.download_button(
+                label="📥 Download Edited YAML",
+                data=yaml_content,
+                file_name=edited_file.name,
+                mime="application/x-yaml"
+            )
+        except Exception as e: logger.error(f"Download prep failed: {e}")
+
         # Paths
         abs_execution_dir = edited_file.parent.resolve()
         target_filename = f"./{edited_file.name}"
@@ -349,16 +362,14 @@ def main():
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # Find ID
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
             
-            # Auto-Correct Title
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- UPLOAD VIA PYTHON (Logic: Replace if ID exists, Create if not) ---
+            # --- UPLOAD VIA PYTHON (Using the validated file directly) ---
             success, response = python_direct_upload(edited_file, readme_key, api_id, logger)
             
             if success:
