@@ -123,15 +123,14 @@ def get_api_id_smart(api_title, api_key, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
-# --- NEW: PYTHON DIRECT UPLOAD ---
+# --- PYTHON DIRECT UPLOAD (Smart Logic) ---
 def python_direct_upload(file_path, api_key, api_id, logger):
     """
-    Directly uploads the file using Python requests, bypassing flaky CLI/Node issues.
+    If ID found -> PUT (Update)
+    If ID missing -> POST (Create New) with Warning
     """
     logger.info("🚀 Starting Direct Python Upload...")
     base_url = "https://dash.readme.com/api/v1/api-specification"
-    
-    # Basic Auth with API Key (password is empty string)
     auth = (api_key, "")
     
     try:
@@ -139,24 +138,24 @@ def python_direct_upload(file_path, api_key, api_id, logger):
             files = {'spec': (file_path.name, f)}
             
             if api_id:
-                # UPDATE Existing API (PUT)
+                # 1. REPLACE / UPDATE
                 url = f"{base_url}/{api_id}"
-                logger.info(f"📤 PUT {url}")
+                logger.info(f"📤 Found ID {api_id}. Updating (PUT)...")
                 res = requests.put(url, auth=auth, files=files)
             else:
-                # CREATE New API (POST)
-                logger.info(f"📤 POST {base_url}")
+                # 2. CREATE NEW
+                logger.warning("⚠️ ID not found. Uploading as NEW API (POST)...")
                 res = requests.post(base_url, auth=auth, files=files)
 
             if res.status_code in [200, 201]:
                 logger.info(f"✅ Upload Success! Status: {res.status_code}")
-                return True
+                return True, res.json()
             else:
                 logger.error(f"❌ Upload Failed: {res.status_code} - {res.text}")
-                return False
+                return False, res.text
     except Exception as e:
         logger.error(f"❌ Upload Exception: {e}")
-        return False
+        return False, str(e)
 
 # --- Git Logic ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
@@ -256,7 +255,7 @@ def main():
 
     st.sidebar.title("⚙️ Refactored Config")
     
-    # Session State for File Persistence
+    # Session State
     if 'current_edited_file' not in st.session_state: st.session_state.current_edited_file = None
 
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
@@ -326,24 +325,14 @@ def main():
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # Store in session state
+        # Store for download
         st.session_state.current_edited_file = str(edited_file)
-
-        # Show Download Button
-        try:
-            with open(edited_file, "r") as f: yaml_content = f.read()
-            dl_container.download_button(
-                label="📥 Download Edited YAML",
-                data=yaml_content,
-                file_name=edited_file.name,
-                mime="application/x-yaml"
-            )
-        except Exception as e: logger.error(f"Download prep failed: {e}")
 
         # Paths
         abs_execution_dir = edited_file.parent.resolve()
         target_filename = f"./{edited_file.name}"
 
+        # --- VALIDATE ---
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -360,34 +349,34 @@ def main():
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
+            # Find ID
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
             
+            # Auto-Correct Title
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- ATTEMPT 1: CLI UPLOAD ---
-            cmd = [npx_path, "--yes", "rdme@latest", "openapi", target_filename, "--key", readme_key]
-            if api_id: cmd.extend(["--id", api_id])
+            # --- UPLOAD VIA PYTHON (Logic: Replace if ID exists, Create if not) ---
+            success, response = python_direct_upload(edited_file, readme_key, api_id, logger)
             
-            cli_success = False
-            if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
-                cli_success = True
-            
-            # --- ATTEMPT 2: PYTHON FALLBACK ---
-            if not cli_success:
-                logger.warning("⚠️ CLI Upload failed. Triggering Python fallback...")
-                if python_direct_upload(edited_file, readme_key, api_id, logger):
-                    st.success("✅ Uploaded successfully (via Python)!")
-                else:
-                    st.error("❌ All upload methods failed.")
+            if success:
+                st.success("✅ Uploaded successfully!")
             else:
-                st.success("✅ Uploaded successfully (via CLI)!")
+                st.error(f"❌ Upload failed: {response}")
+
         else:
             st.success("Validation Passed.")
 
-    if st.session_state.logs and st.button("Clear Logs"): clear_logs()
+    # Show download button if file exists in session
+    if st.session_state.current_edited_file:
+         p = Path(st.session_state.current_edited_file)
+         if p.exists():
+             with open(p, "r") as f:
+                 dl_container.download_button("📥 Download YAML", f.read(), p.name, "application/x-yaml")
+
+    if st.session_state.logs and st.button("Clear Logs"): st.session_state.logs = []
 
     if st.session_state.logs and gemini_key:
         if st.button("Analyze Logs with AI"):
