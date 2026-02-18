@@ -123,14 +123,29 @@ def get_api_id_smart(api_title, api_key, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
+# --- NEW: PACKAGING FOR UPLOAD (Fixes 400 Error) ---
+def package_for_upload(file_path, npx_path, logger):
+    """
+    Bundles the YAML file so all $refs are inline. 
+    This is required because ReadMe API cannot access your local folders.
+    """
+    logger.info("📦 Packaging (Bundling) file for upload...")
+    # Use a distinct name so we don't confuse it with the edited source
+    packed_filename = f"{file_path.stem}_packed.yaml"
+    packed_path = file_path.parent / packed_filename
+    
+    # swagger-cli bundle -o <outfile> -t yaml <infile>
+    cmd = [npx_path, "--yes", "swagger-cli", "bundle", "-o", packed_filename, "-t", "yaml", file_path.name]
+    
+    if run_command(cmd, logger, cwd=file_path.parent) == 0:
+        logger.info(f"✅ Packaging Successful: {packed_filename}")
+        return packed_path
+    else:
+        logger.error("❌ Packaging Failed. Cannot upload split files.")
+        return None
+
 # --- PYTHON DIRECT UPLOAD ---
 def python_direct_upload(file_path, api_key, api_id, logger):
-    """
-    Directly uploads the file using Python requests.
-    Logic:
-    - If ID exists: PUT (Update)
-    - If ID missing: POST (Create New) with Warning
-    """
     logger.info("🚀 Starting Direct Python Upload...")
     base_url = "https://dash.readme.com/api/v1/api-specification"
     auth = (api_key, "")
@@ -138,14 +153,11 @@ def python_direct_upload(file_path, api_key, api_id, logger):
     try:
         with open(file_path, 'rb') as f:
             files = {'spec': (file_path.name, f)}
-            
             if api_id:
-                # 1. REPLACE / UPDATE
                 url = f"{base_url}/{api_id}"
                 logger.info(f"📤 Found ID {api_id}. Updating (PUT)...")
                 res = requests.put(url, auth=auth, files=files)
             else:
-                # 2. CREATE NEW
                 logger.warning("⚠️ ID not found. Uploading as NEW API (POST)...")
                 res = requests.post(base_url, auth=auth, files=files)
 
@@ -201,7 +213,6 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     workspace_path = Path(workspace)
     workspace_path.mkdir(parents=True, exist_ok=True)
     
-    # Preserve directory structure logic
     try:
         rel_path = source.resolve().relative_to(paths['specs'].resolve())
         destination = workspace_path / rel_path
@@ -358,29 +369,38 @@ def main():
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
             
+            # Read Title
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
+            # Find ID
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
             
+            # Auto-Correct Title
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- UPLOAD VIA PYTHON (Using the validated file directly) ---
-            success, response = python_direct_upload(edited_file, readme_key, api_id, logger)
+            # --- KEY FIX: PACKAGE FOR UPLOAD ---
+            # We MUST bundle the file, otherwise ReadMe rejects it with 400 Bad Request
+            packed_path = package_for_upload(edited_file, npx_path, logger)
             
-            if success:
-                st.success("✅ Uploaded successfully!")
+            if packed_path:
+                # Upload the PACKAGED file, not the split source file
+                success, response = python_direct_upload(packed_path, readme_key, api_id, logger)
+                
+                if success:
+                    st.success("✅ Uploaded successfully!")
+                else:
+                    st.error(f"❌ Upload failed: {response}")
             else:
-                st.error(f"❌ Upload failed: {response}")
+                st.error("❌ Failed to package file for upload.")
 
         else:
             st.success("Validation Passed.")
 
-    # Show download button if file exists in session
     if st.session_state.current_edited_file:
          p = Path(st.session_state.current_edited_file)
          if p.exists():
