@@ -127,22 +127,79 @@ def get_api_id_smart(api_title, api_key, target_version, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
-# --- PACKAGING FOR UPLOAD ---
-def package_for_upload(file_path, npx_path, logger):
-    logger.info("📦 Packaging (Bundling) file for upload...")
-    packed_filename = f"{file_path.stem}_packed.yaml"
-    packed_path = file_path.parent / packed_filename
+# --- PYTHON DIRECT UPLOAD (Catches 403 Git-Backed Error) ---
+def python_direct_upload(file_path, api_key, api_id, target_version, logger):
+    logger.info(f"🚀 Starting Direct Python Upload to branch/version: {target_version}...")
+    base_url = "https://dash.readme.com/api/v1/api-specification"
+    auth = (api_key, "")
     
-    cmd = [npx_path, "--yes", "swagger-cli", "bundle", "-o", packed_filename, "-t", "yaml", file_path.name]
+    headers = {
+        "x-readme-version": target_version,
+        "Accept": "application/json"
+    }
     
-    if run_command(cmd, logger, cwd=file_path.parent) == 0:
-        logger.info(f"✅ Packaging Successful: {packed_filename}")
-        return packed_path
-    else:
-        logger.error("❌ Packaging Failed.")
-        return None
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'spec': (file_path.name, f)}
+            if api_id:
+                url = f"{base_url}/{api_id}"
+                logger.info(f"📤 Found ID {api_id}. Updating (PUT)...")
+                res = requests.put(url, auth=auth, headers=headers, files=files)
+            else:
+                logger.warning("⚠️ ID not found. Uploading as NEW API (POST)...")
+                res = requests.post(base_url, auth=auth, headers=headers, files=files)
 
-# --- Git Logic ---
+            if res.status_code in [200, 201]:
+                logger.info(f"✅ Upload Success! Status: {res.status_code}")
+                return True, res.json()
+            elif res.status_code == 403 and "Git-backed" in res.text:
+                logger.warning("❌ ReadMe blocked the upload because your project is Git-backed.")
+                return False, "GIT_BACKED"
+            else:
+                logger.error(f"❌ Upload Failed: {res.status_code} - {res.text}")
+                return False, res.text
+    except Exception as e:
+        logger.error(f"❌ Upload Exception: {e}")
+        return False, str(e)
+
+# --- GIT PUSH FALLBACK ---
+def push_to_git(repo_dir, source_file_path, edited_file_path, git_user, branch_name, logger):
+    logger.info(f"🚀 Pivoting to Git Push for branch '{branch_name}'...")
+    env_vars = os.environ.copy()
+    env_vars["GIT_TERMINAL_PROMPT"] = "0"
+    
+    try:
+        # Overwrite the original repo file with the edited content
+        shutil.copy(edited_file_path, source_file_path)
+        logger.info(f"📂 Overwrote local repo file: {source_file_path.name}")
+        
+        # Git config
+        subprocess.run(["git", "-C", repo_dir, "config", "user.email", "bot@openapi-validator.com"], check=True, env=env_vars)
+        subprocess.run(["git", "-C", repo_dir, "config", "user.name", git_user or "OpenAPI Bot"], check=True, env=env_vars)
+        
+        # Git add
+        subprocess.run(["git", "-C", repo_dir, "add", str(source_file_path)], check=True, env=env_vars)
+        
+        # Check for changes
+        status = subprocess.run(["git", "-C", repo_dir, "status", "--porcelain"], capture_output=True, text=True, env=env_vars)
+        if not status.stdout.strip():
+            logger.info("⚠️ No changes detected in the YAML file. Skipping commit.")
+            return True, "No changes to push."
+
+        # Git commit
+        subprocess.run(["git", "-C", repo_dir, "commit", "-m", f"docs: update OpenAPI spec {source_file_path.name}"], check=True, env=env_vars)
+        
+        # Git push
+        logger.info("📤 Pushing to remote repository...")
+        subprocess.run(["git", "-C", repo_dir, "push", "origin", branch_name], check=True, env=env_vars)
+        
+        logger.info("✅ Successfully pushed to Git!")
+        return True, "Pushed to Git successfully. ReadMe will sync shortly."
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Git Push Failed. Ensure your Git Token has write access.")
+        return False, f"Git push failed: {e}"
+
+# --- Git Clone Logic ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
     logger.info(f"🚀 Starting Git Operation for branch: {branch_name}...")
     repo_path = Path(repo_dir)
@@ -197,13 +254,15 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     for folder in dependency_list:
         clean = folder.strip()
         if not clean: continue
-        src = Path(paths['specs']) / clean
-        dest = workspace_path / clean
-        if src.exists():
-            if dest.exists(): shutil.rmtree(dest)
-            shutil.copytree(src, dest)
+        src_dir = Path(paths['specs']) / clean
+        dest_dir = workspace_path / clean
+        if src_dir.exists():
+            if dest_dir.exists(): shutil.rmtree(dest_dir)
+            shutil.copytree(src_dir, dest_dir)
             logger.info(f"📂 Copied dependency: {clean}")
-    return destination
+            
+    # Return destination (for validation) AND source (for Git push)
+    return destination, source
 
 def process_yaml_content(file_path, api_domain, target_version, logger):
     logger.info(f"🛠️ Injecting extensions and setting version to '{target_version}'...")
@@ -296,7 +355,7 @@ def main():
 
     c_btn1, c_btn2 = st.columns(2)
     btn_validate = c_btn1.button("🔍 Validate")
-    btn_upload = c_btn2.button("🚀 Upload", type="primary")
+    btn_upload = c_btn2.button("🚀 Upload / Push", type="primary")
 
     log_container = st.empty()
     download_placeholder = st.empty()
@@ -315,7 +374,7 @@ def main():
         if not npx_path: logger.error("❌ NodeJS/npx not found."); st.stop()
 
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
-        final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
+        final_yaml_path, original_source_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, target_branch, logger)
         
         st.session_state.current_edited_file = str(edited_file)
@@ -331,10 +390,9 @@ def main():
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
         abs_execution_dir = edited_file.parent.resolve()
-        
-        # FIX: We only use the clean filename (no './') to prevent CLI parsing bugs
-        target_filename = edited_file.name
+        target_filename = f"./{edited_file.name}"
 
+        # --- VALIDATE ---
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -345,7 +403,7 @@ def main():
             if btn_upload: st.stop()
         
         elif btn_upload:
-            logger.info("🚀 Preparing Upload via ReadMe CLI...")
+            logger.info("🚀 Preparing Upload...")
             
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
@@ -353,40 +411,28 @@ def main():
             
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, target_branch, logger)
             
-            # --- CRITICAL FIX: INJECT THE ID DIRECTLY INTO THE YAML ---
-            # Modern rdme CLI ignores --id and expects it in the file
-            needs_update = False
-            if api_id:
-                logger.info(f"Injecting ID {api_id} into x-readme block...")
-                if "x-readme" not in ydata:
-                    ydata["x-readme"] = {}
-                ydata["x-readme"]["id"] = api_id
-                needs_update = True
-                
-            if matched_title and matched_title != ytitle:
+            if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
-                needs_update = True
-
-            if needs_update:
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # BUNDLE the file so ReadMe CLI has a self-contained spec to push
-            packed_path = package_for_upload(edited_file, npx_path, logger)
+            # --- UPLOAD OR PUSH ---
+            success, response = python_direct_upload(edited_file, readme_key, api_id, target_branch, logger)
             
-            if packed_path:
-                packed_filename = packed_path.name
+            if success:
+                st.success("✅ Uploaded successfully via ReadMe API!")
+            
+            elif response == "GIT_BACKED":
+                st.warning("ReadMe blocked API upload (Git-Backed Project). Triggering Git Push...")
                 
-                # --- FINAL CLI COMMAND ---
-                # No --id flag. No ./ in the path. Pure CLI sync designed for Git-backed projects.
-                cmd = [npx_path, "--yes", "rdme@latest", "openapi", packed_filename, "--key", readme_key]
-                
-                if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
-                    st.success("✅ Uploaded successfully via CLI!")
+                git_success, git_msg = push_to_git(repo_path, original_source_path, edited_file, git_user, branch_name, logger)
+                if git_success:
+                    st.success(f"✅ {git_msg}")
                 else:
-                    st.error("❌ CLI Upload failed. (See logs for details)")
+                    st.error(f"❌ {git_msg}")
+            
             else:
-                st.error("❌ Failed to package file for upload.")
+                st.error(f"❌ Upload failed: {response}")
 
         else:
             st.success("Validation Passed.")
