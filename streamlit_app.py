@@ -127,7 +127,7 @@ def get_api_id_smart(api_title, api_key, target_version, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
-# --- PACKAGING FOR UPLOAD (Fixes 400 Error) ---
+# --- PACKAGING FOR UPLOAD ---
 def package_for_upload(file_path, npx_path, logger):
     logger.info("📦 Packaging (Bundling) file for upload...")
     packed_filename = f"{file_path.stem}_packed.yaml"
@@ -139,40 +139,8 @@ def package_for_upload(file_path, npx_path, logger):
         logger.info(f"✅ Packaging Successful: {packed_filename}")
         return packed_path
     else:
-        logger.error("❌ Packaging Failed. Cannot upload split files.")
+        logger.error("❌ Packaging Failed.")
         return None
-
-# --- PYTHON DIRECT UPLOAD (WITH BRANCH TARGETING) ---
-def python_direct_upload(file_path, api_key, api_id, target_version, logger):
-    logger.info(f"🚀 Starting Direct Python Upload to branch/version: {target_version}...")
-    base_url = "https://dash.readme.com/api/v1/api-specification"
-    auth = (api_key, "")
-    
-    headers = {
-        "x-readme-version": target_version,
-        "Accept": "application/json"
-    }
-    
-    try:
-        with open(file_path, 'rb') as f:
-            files = {'spec': (file_path.name, f)}
-            if api_id:
-                url = f"{base_url}/{api_id}"
-                logger.info(f"📤 Found ID {api_id}. Updating (PUT)...")
-                res = requests.put(url, auth=auth, headers=headers, files=files)
-            else:
-                logger.warning("⚠️ ID not found. Uploading as NEW API (POST)...")
-                res = requests.post(base_url, auth=auth, headers=headers, files=files)
-
-            if res.status_code in [200, 201]:
-                logger.info(f"✅ Upload Success! Status: {res.status_code}")
-                return True, res.json()
-            else:
-                logger.error(f"❌ Upload Failed: {res.status_code} - {res.text}")
-                return False, res.text
-    except Exception as e:
-        logger.error(f"❌ Upload Exception: {e}")
-        return False, str(e)
 
 # --- Git Logic ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
@@ -237,19 +205,16 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
             logger.info(f"📂 Copied dependency: {clean}")
     return destination
 
-# --- UPDATED: YAML Processor injects UI Target Branch into info.version ---
 def process_yaml_content(file_path, api_domain, target_version, logger):
-    logger.info(f"🛠️ Injecting x-readme extensions and mapping version to '{target_version}'...")
+    logger.info(f"🛠️ Injecting extensions and setting version to '{target_version}'...")
     try:
         with open(file_path, "r") as f: data = yaml.safe_load(f)
         
-        # 1. Map the Version
         if "info" not in data:
             data["info"] = {"title": file_path.stem, "version": target_version}
         else:
             data["info"]["version"] = target_version
 
-        # 2. Inject x-readme
         if "openapi" in data:
             pos = list(data.keys()).index("openapi")
             items = list(data.items())
@@ -257,7 +222,6 @@ def process_yaml_content(file_path, api_domain, target_version, logger):
                 items.insert(pos + 1, ("x-readme", {"explorer-enabled": False}))
                 data = dict(items)
                 
-        # 3. Handle Servers
         domain = api_domain if api_domain else "example.com"
         if "servers" not in data or not data["servers"]: data["servers"] = [{"url": f"https://{domain}", "variables": {}}]
         if "variables" not in data["servers"][0]: data["servers"][0]["variables"] = {}
@@ -322,7 +286,6 @@ def main():
         files = sorted(list(set(files)))
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
     with col2: 
-        # UI Input: This captures the Target Branch/Version
         target_branch = st.text_input("Target ReadMe Branch", "main")
 
     st.markdown("### Settings")
@@ -353,8 +316,6 @@ def main():
 
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
-        
-        # --- PASS TARGET BRANCH TO YAML PROCESSOR ---
         edited_file = process_yaml_content(final_yaml_path, api_domain, target_branch, logger)
         
         st.session_state.current_edited_file = str(edited_file)
@@ -370,7 +331,9 @@ def main():
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
         abs_execution_dir = edited_file.parent.resolve()
-        target_filename = f"./{edited_file.name}"
+        
+        # FIX: We only use the clean filename (no './') to prevent CLI parsing bugs
+        target_filename = edited_file.name
 
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -382,7 +345,7 @@ def main():
             if btn_upload: st.stop()
         
         elif btn_upload:
-            logger.info("🚀 Preparing Upload...")
+            logger.info("🚀 Preparing Upload via ReadMe CLI...")
             
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
@@ -390,19 +353,38 @@ def main():
             
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, target_branch, logger)
             
-            if api_id and matched_title and matched_title != ytitle:
+            # --- CRITICAL FIX: INJECT THE ID DIRECTLY INTO THE YAML ---
+            # Modern rdme CLI ignores --id and expects it in the file
+            needs_update = False
+            if api_id:
+                logger.info(f"Injecting ID {api_id} into x-readme block...")
+                if "x-readme" not in ydata:
+                    ydata["x-readme"] = {}
+                ydata["x-readme"]["id"] = api_id
+                needs_update = True
+                
+            if matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
+                needs_update = True
+
+            if needs_update:
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
+            # BUNDLE the file so ReadMe CLI has a self-contained spec to push
             packed_path = package_for_upload(edited_file, npx_path, logger)
             
             if packed_path:
-                success, response = python_direct_upload(packed_path, readme_key, api_id, target_branch, logger)
-                if success:
-                    st.success("✅ Uploaded successfully!")
+                packed_filename = packed_path.name
+                
+                # --- FINAL CLI COMMAND ---
+                # No --id flag. No ./ in the path. Pure CLI sync designed for Git-backed projects.
+                cmd = [npx_path, "--yes", "rdme@latest", "openapi", packed_filename, "--key", readme_key]
+                
+                if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
+                    st.success("✅ Uploaded successfully via CLI!")
                 else:
-                    st.error(f"❌ Upload failed: {response}")
+                    st.error("❌ CLI Upload failed. (See logs for details)")
             else:
                 st.error("❌ Failed to package file for upload.")
 
