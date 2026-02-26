@@ -126,8 +126,7 @@ def get_api_id_smart(api_title, api_key, target_version, logger):
             logger.warning(f"⚠️ No matching API found for '{api_title}'")
             
         elif res.status_code == 403:
-            # Prevent the scary red error. Explains the Git-backed limitation gracefully.
-            logger.warning("⚠️ ID Lookup Blocked (403). ReadMe restricts REST API access for Git-backed projects. The CLI will handle matching automatically.")
+            logger.warning("⚠️ ID Lookup Blocked (403). ReadMe restricts REST API access for Git-backed projects. The CLI will handle matching.")
         else: 
             logger.error(f"❌ ReadMe API Error: {res.status_code}")
     except Exception as e: 
@@ -221,9 +220,9 @@ def process_yaml_content(file_path, api_domain, target_version, logger):
         data["servers"][0]["variables"]["base-url"] = {"default": domain}
         data["servers"][0]["variables"]["protocol"] = {"default": "https"}
         
-        # --- CRITICAL FIX: Overwrite the original file to maintain the matching filename slug ---
-        with open(file_path, "w") as f: yaml.dump(data, f, sort_keys=False)
-        return file_path
+        edited_path = file_path.parent / (file_path.stem + "_edited.yaml")
+        with open(edited_path, "w") as f: yaml.dump(data, f, sort_keys=False)
+        return edited_path
     except Exception as e: 
         logger.error(f"❌ YAML Error: {e}")
         st.stop()
@@ -281,7 +280,7 @@ def main():
         files = sorted(list(set(files)))
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
     with col2: 
-        target_branch = st.text_input("Target ReadMe Branch", "main")
+        target_branch = st.text_input("Target ReadMe Branch/Version", "main")
 
     st.markdown("### Settings")
     c1, c2, c3 = st.columns(3)
@@ -315,15 +314,7 @@ def main():
         
         st.session_state.current_edited_file = str(edited_file)
 
-        try:
-            with open(edited_file, "r") as f: yaml_content = f.read()
-            dl_container.download_button(
-                label="📥 Download YAML",
-                data=yaml_content,
-                file_name=edited_file.name,
-                mime="application/x-yaml"
-            )
-        except Exception as e: logger.error(f"Download prep failed: {e}")
+        # Removed duplicate download logic here to prevent StreamlitDuplicateElementId error.
 
         abs_execution_dir = edited_file.parent.resolve()
         
@@ -364,7 +355,7 @@ def main():
             if needs_update:
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- THE FINAL, CORRECT CLI COMMAND (Added 'upload' back in!) ---
+            # --- THE FINAL, CORRECT CLI COMMAND (Using 'upload' subcommand) ---
             cmd = [npx_path, "--yes", "rdme@latest", "openapi", "upload", clean_filename, "--key", readme_key]
             
             if target_branch:
@@ -378,11 +369,18 @@ def main():
         else:
             st.success("Validation Passed.")
 
+    # Show download button exactly once to avoid DuplicateElementId crashes
     if st.session_state.current_edited_file:
          p = Path(st.session_state.current_edited_file)
          if p.exists():
              with open(p, "r") as f:
-                 dl_container.download_button("📥 Download YAML", f.read(), p.name, "application/x-yaml")
+                 dl_container.download_button(
+                     label="📥 Download YAML", 
+                     data=f.read(), 
+                     file_name=p.name, 
+                     mime="application/x-yaml",
+                     key="download_edited_yaml_btn" # Unique key secures it
+                 )
 
     if st.session_state.logs and st.button("Clear Logs"): st.session_state.logs = []
 
