@@ -14,8 +14,8 @@ from google import genai
 
 # Page Config
 st.set_page_config(
-    page_title="SudoDocs OAS Validator",
-    page_icon="https://sudodocs.com/favicon.ico",
+    page_title="Refactored OpenAPI Validator",
+    page_icon="📘",
     layout="wide"
 )
 
@@ -102,11 +102,15 @@ def analyze_errors_with_ai(log_content, api_key, model_name):
     except Exception as e: return f"AI Error: {e}"
 
 # --- Smart ID Lookup ---
-def get_api_id_smart(api_title, api_key, logger):
-    headers = {"Authorization": f"Basic {api_key}", "Accept": "application/json"}
+def get_api_id_smart(api_title, api_key, target_version, logger):
+    headers = {
+        "Authorization": f"Basic {api_key}", 
+        "Accept": "application/json",
+        "x-readme-version": target_version
+    }
     base_url = "https://dash.readme.com/api/v1"
     try:
-        logger.info(f"🔎 Looking for ID for: '{api_title}'")
+        logger.info(f"🔎 Looking for ID for: '{api_title}' in branch/version '{target_version}'")
         def tokenize(text): return set(re.findall(r'\w+', text.lower()))
         target_tokens = tokenize(api_title)
         res = requests.get(f"{base_url}/api-specification", headers=headers, params={"perPage": 100})
@@ -123,18 +127,12 @@ def get_api_id_smart(api_title, api_key, logger):
     except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
-# --- NEW: PACKAGING FOR UPLOAD (Fixes 400 Error) ---
+# --- PACKAGING FOR UPLOAD (Fixes 400 Error) ---
 def package_for_upload(file_path, npx_path, logger):
-    """
-    Bundles the YAML file so all $refs are inline. 
-    This is required because ReadMe API cannot access your local folders.
-    """
     logger.info("📦 Packaging (Bundling) file for upload...")
-    # Use a distinct name so we don't confuse it with the edited source
     packed_filename = f"{file_path.stem}_packed.yaml"
     packed_path = file_path.parent / packed_filename
     
-    # swagger-cli bundle -o <outfile> -t yaml <infile>
     cmd = [npx_path, "--yes", "swagger-cli", "bundle", "-o", packed_filename, "-t", "yaml", file_path.name]
     
     if run_command(cmd, logger, cwd=file_path.parent) == 0:
@@ -144,11 +142,17 @@ def package_for_upload(file_path, npx_path, logger):
         logger.error("❌ Packaging Failed. Cannot upload split files.")
         return None
 
-# --- PYTHON DIRECT UPLOAD ---
-def python_direct_upload(file_path, api_key, api_id, logger):
-    logger.info("🚀 Starting Direct Python Upload...")
+# --- PYTHON DIRECT UPLOAD (WITH BRANCH TARGETING) ---
+def python_direct_upload(file_path, api_key, api_id, target_version, logger):
+    logger.info(f"🚀 Starting Direct Python Upload to branch/version: {target_version}...")
     base_url = "https://dash.readme.com/api/v1/api-specification"
     auth = (api_key, "")
+    
+    # Inject the target branch as the version header
+    headers = {
+        "x-readme-version": target_version,
+        "Accept": "application/json"
+    }
     
     try:
         with open(file_path, 'rb') as f:
@@ -156,10 +160,10 @@ def python_direct_upload(file_path, api_key, api_id, logger):
             if api_id:
                 url = f"{base_url}/{api_id}"
                 logger.info(f"📤 Found ID {api_id}. Updating (PUT)...")
-                res = requests.put(url, auth=auth, files=files)
+                res = requests.put(url, auth=auth, headers=headers, files=files)
             else:
                 logger.warning("⚠️ ID not found. Uploading as NEW API (POST)...")
-                res = requests.post(base_url, auth=auth, files=files)
+                res = requests.post(base_url, auth=auth, headers=headers, files=files)
 
             if res.status_code in [200, 201]:
                 logger.info(f"✅ Upload Success! Status: {res.status_code}")
@@ -268,7 +272,6 @@ def main():
 
     st.sidebar.title("⚙️ Refactored Config")
     
-    # Session State
     if 'current_edited_file' not in st.session_state: st.session_state.current_edited_file = None
 
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
@@ -297,7 +300,7 @@ def main():
     if secondary_rel_path: paths["secondary"] = Path(repo_path) / secondary_rel_path
     workspace_dir = "./temp_workspace"
 
-    st.title("SudoDocs OAS Validator")
+    st.title("🚀 Refactored OpenAPI Validator")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -338,10 +341,8 @@ def main():
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
-        # Store for download
         st.session_state.current_edited_file = str(edited_file)
 
-        # Show Download Button
         try:
             with open(edited_file, "r") as f: yaml_content = f.read()
             dl_container.download_button(
@@ -352,11 +353,9 @@ def main():
             )
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
-        # Paths
         abs_execution_dir = edited_file.parent.resolve()
         target_filename = f"./{edited_file.name}"
 
-        # --- VALIDATE ---
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", target_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -369,28 +368,24 @@ def main():
         elif btn_upload:
             logger.info("🚀 Preparing Upload...")
             
-            # Read Title
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # Find ID
-            api_id, matched_title = get_api_id_smart(ytitle, readme_key, logger)
+            # Pass the target_branch into the ID search as well, to ensure it looks in the correct version
+            api_id, matched_title = get_api_id_smart(ytitle, readme_key, target_branch, logger)
             
-            # Auto-Correct Title
             if api_id and matched_title and matched_title != ytitle:
                 logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- KEY FIX: PACKAGE FOR UPLOAD ---
-            # We MUST bundle the file, otherwise ReadMe rejects it with 400 Bad Request
+            # WE MUST PACKAGE THE FILE to bypass the 400 'Unable to resolve $ref pointer' error
             packed_path = package_for_upload(edited_file, npx_path, logger)
             
             if packed_path:
-                # Upload the PACKAGED file, not the split source file
-                success, response = python_direct_upload(packed_path, readme_key, api_id, logger)
-                
+                # Upload the packed file passing in the target_branch
+                success, response = python_direct_upload(packed_path, readme_key, api_id, target_branch, logger)
                 if success:
                     st.success("✅ Uploaded successfully!")
                 else:
