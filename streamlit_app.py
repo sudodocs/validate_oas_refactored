@@ -114,6 +114,7 @@ def get_api_id_smart(api_title, api_key, target_version, logger):
         def tokenize(text): return set(re.findall(r'\w+', text.lower()))
         target_tokens = tokenize(api_title)
         res = requests.get(f"{base_url}/api-specification", headers=headers, params={"perPage": 100})
+        
         if res.status_code == 200:
             apis = res.json()
             for api in apis:
@@ -123,8 +124,14 @@ def get_api_id_smart(api_title, api_key, target_version, logger):
                     logger.info(f"✨ Smart Match found: '{api['title']}'")
                     return api["_id"], api["title"]
             logger.warning(f"⚠️ No matching API found for '{api_title}'")
-        else: logger.error(f"❌ ReadMe API Error: {res.status_code}")
-    except Exception as e: logger.error(f"❌ ID Lookup Exception: {e}")
+            
+        elif res.status_code == 403:
+            # Prevent the scary red error. Explains the Git-backed limitation gracefully.
+            logger.warning("⚠️ ID Lookup Blocked (403). ReadMe restricts REST API access for Git-backed projects. The CLI will handle matching automatically.")
+        else: 
+            logger.error(f"❌ ReadMe API Error: {res.status_code}")
+    except Exception as e: 
+        logger.error(f"❌ ID Lookup Exception: {e}")
     return None, None
 
 # --- Git Logic ---
@@ -214,10 +221,12 @@ def process_yaml_content(file_path, api_domain, target_version, logger):
         data["servers"][0]["variables"]["base-url"] = {"default": domain}
         data["servers"][0]["variables"]["protocol"] = {"default": "https"}
         
-        edited_path = file_path.parent / (file_path.stem + "_edited.yaml")
-        with open(edited_path, "w") as f: yaml.dump(data, f, sort_keys=False)
-        return edited_path
-    except Exception as e: logger.error(f"❌ YAML Error: {e}"); st.stop()
+        # --- CRITICAL FIX: Overwrite the original file to maintain the matching filename slug ---
+        with open(file_path, "w") as f: yaml.dump(data, f, sort_keys=False)
+        return file_path
+    except Exception as e: 
+        logger.error(f"❌ YAML Error: {e}")
+        st.stop()
 
 # --- CALLBACKS ---
 def clear_credentials():
@@ -272,7 +281,7 @@ def main():
         files = sorted(list(set(files)))
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
     with col2: 
-        target_branch = st.text_input("Target ReadMe Branch/Version", "main")
+        target_branch = st.text_input("Target ReadMe Branch", "main")
 
     st.markdown("### Settings")
     c1, c2, c3 = st.columns(3)
@@ -309,17 +318,16 @@ def main():
         try:
             with open(edited_file, "r") as f: yaml_content = f.read()
             dl_container.download_button(
-                label="📥 Download Edited YAML",
+                label="📥 Download YAML",
                 data=yaml_content,
                 file_name=edited_file.name,
                 mime="application/x-yaml"
             )
         except Exception as e: logger.error(f"Download prep failed: {e}")
 
-        # The absolute directory where we execute CLI
         abs_execution_dir = edited_file.parent.resolve()
         
-        # --- CRITICAL FIX: The filename WITHOUT the './' prefix ---
+        # Pure filename string to avoid path parsing bugs in the CLI
         clean_filename = edited_file.name
 
         # --- VALIDATE ---
@@ -333,21 +341,18 @@ def main():
             if btn_upload: st.stop()
         
         elif btn_upload:
-            logger.info("🚀 Preparing CLI Upload...")
+            logger.info("🚀 Preparing Upload via ReadMe CLI...")
             
             with open(edited_file, "r") as f:
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # Lookup ID (Might throw 403, but we ignore and proceed to upload anyway)
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, target_branch, logger)
             
             needs_update = False
-            # If ID found, embed it so rdme CLI knows to Update (PUT) instead of Create (POST)
             if api_id:
-                logger.info(f"Injecting ID {api_id} into x-readme block for updating...")
-                if "x-readme" not in ydata:
-                    ydata["x-readme"] = {}
+                logger.info(f"📤 Injecting ID {api_id} for updating...")
+                if "x-readme" not in ydata: ydata["x-readme"] = {}
                 ydata["x-readme"]["id"] = api_id
                 needs_update = True
                 
@@ -359,10 +364,8 @@ def main():
             if needs_update:
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- THE FINAL CLI UPLOAD COMMAND ---
-            # We rely entirely on `rdme` because it automatically handles $ref bundling locally.
-            # We pass the clean filename (no './') to prevent CLI parsing glitches.
-            cmd = [npx_path, "--yes", "rdme@latest", "openapi", clean_filename, "--key", readme_key]
+            # --- THE FINAL, CORRECT CLI COMMAND (Added 'upload' back in!) ---
+            cmd = [npx_path, "--yes", "rdme@latest", "openapi", "upload", clean_filename, "--key", readme_key]
             
             if target_branch:
                 cmd.extend(["--version", target_branch])
