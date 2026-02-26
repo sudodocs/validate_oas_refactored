@@ -148,7 +148,6 @@ def python_direct_upload(file_path, api_key, api_id, target_version, logger):
     base_url = "https://dash.readme.com/api/v1/api-specification"
     auth = (api_key, "")
     
-    # Inject the target branch as the version header
     headers = {
         "x-readme-version": target_version,
         "Accept": "application/json"
@@ -238,20 +237,33 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
             logger.info(f"📂 Copied dependency: {clean}")
     return destination
 
-def process_yaml_content(file_path, api_domain, logger):
-    logger.info("🛠️ Injecting x-readme extensions...")
+# --- UPDATED: YAML Processor injects UI Target Branch into info.version ---
+def process_yaml_content(file_path, api_domain, target_version, logger):
+    logger.info(f"🛠️ Injecting x-readme extensions and mapping version to '{target_version}'...")
     try:
         with open(file_path, "r") as f: data = yaml.safe_load(f)
+        
+        # 1. Map the Version
+        if "info" not in data:
+            data["info"] = {"title": file_path.stem, "version": target_version}
+        else:
+            data["info"]["version"] = target_version
+
+        # 2. Inject x-readme
         if "openapi" in data:
             pos = list(data.keys()).index("openapi")
             items = list(data.items())
-            items.insert(pos + 1, ("x-readme", {"explorer-enabled": False}))
-            data = dict(items)
+            if "x-readme" not in data:
+                items.insert(pos + 1, ("x-readme", {"explorer-enabled": False}))
+                data = dict(items)
+                
+        # 3. Handle Servers
         domain = api_domain if api_domain else "example.com"
         if "servers" not in data or not data["servers"]: data["servers"] = [{"url": f"https://{domain}", "variables": {}}]
         if "variables" not in data["servers"][0]: data["servers"][0]["variables"] = {}
         data["servers"][0]["variables"]["base-url"] = {"default": domain}
         data["servers"][0]["variables"]["protocol"] = {"default": "https"}
+        
         edited_path = file_path.parent / (file_path.stem + "_edited.yaml")
         with open(edited_path, "w") as f: yaml.dump(data, f, sort_keys=False)
         return edited_path
@@ -309,7 +321,9 @@ def main():
         if "secondary" in paths and paths["secondary"].exists(): files.extend([f.stem for f in paths["secondary"].glob("*.yaml")])
         files = sorted(list(set(files)))
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
-    with col2: target_branch = st.text_input("Target ReadMe Branch", "main")
+    with col2: 
+        # UI Input: This captures the Target Branch/Version
+        target_branch = st.text_input("Target ReadMe Branch", "main")
 
     st.markdown("### Settings")
     c1, c2, c3 = st.columns(3)
@@ -339,7 +353,9 @@ def main():
 
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
-        edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
+        
+        # --- PASS TARGET BRANCH TO YAML PROCESSOR ---
+        edited_file = process_yaml_content(final_yaml_path, api_domain, target_branch, logger)
         
         st.session_state.current_edited_file = str(edited_file)
 
@@ -372,7 +388,6 @@ def main():
                 ydata = yaml.safe_load(f)
                 ytitle = ydata.get("info", {}).get("title", "")
             
-            # Pass the target_branch into the ID search as well, to ensure it looks in the correct version
             api_id, matched_title = get_api_id_smart(ytitle, readme_key, target_branch, logger)
             
             if api_id and matched_title and matched_title != ytitle:
@@ -380,11 +395,9 @@ def main():
                 ydata["info"]["title"] = matched_title
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # WE MUST PACKAGE THE FILE to bypass the 400 'Unable to resolve $ref pointer' error
             packed_path = package_for_upload(edited_file, npx_path, logger)
             
             if packed_path:
-                # Upload the packed file passing in the target_branch
                 success, response = python_direct_upload(packed_path, readme_key, api_id, target_branch, logger)
                 if success:
                     st.success("✅ Uploaded successfully!")
