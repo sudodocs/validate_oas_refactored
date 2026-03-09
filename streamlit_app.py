@@ -357,7 +357,8 @@ def main():
 
             # --- THE FINAL, CORRECT CLI COMMAND (Refactored Compatible) ---
             # 1. Remove "upload" (it is not a valid subcommand for 'openapi')
-            cmd = [npx_path, "--yes", "rdme@latest", "openapi", clean_filename, "--key", readme_key]
+            
+            cmd = [npx_path, "--yes", "rdme@latest", "openapi", str(edited_file.resolve()), "--key", readme_key]
 
             # 2. Use '--branch' instead of '--version' for Refactored projects
             if target_branch:
