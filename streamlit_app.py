@@ -363,7 +363,7 @@ def main():
             if target_branch:
             
                 # If the user enters a specific branch, use the --branch flag
-                cmd.extend(["--branch", target_branch]))
+                cmd.extend(["--branch", target_branch])
                 
             if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
                 st.success("✅ Uploaded successfully via CLI!")
