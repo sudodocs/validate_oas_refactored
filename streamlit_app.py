@@ -5,7 +5,6 @@ import shutil
 import requests
 import os
 import logging
-import sys
 import urllib.parse
 import tarfile
 import re
@@ -35,7 +34,7 @@ def ensure_node_installed():
         pass
 
     if not node_bin_path.exists():
-        with st.spinner(f"🔧 Installing Node.js {node_version} (Required for ReadMe v10)..."):
+        with st.spinner(f"🔧 Installing Node.js {node_version}..."):
             url = f"https://nodejs.org/dist/{node_version}/{node_dirname}.tar.xz"
             response = requests.get(url, stream=True)
             if response.status_code == 200:
@@ -101,9 +100,9 @@ def analyze_errors_with_ai(log_content, api_key, model_name):
         return response.text
     except Exception as e: return f"AI Error: {e}"
 
-# --- Git Logic ---
+# --- Git Logic (READ ONLY - NO PUSHING) ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
-    logger.info(f"🚀 Starting Git Operation for branch: {branch_name}...")
+    logger.info(f"🚀 Pulling latest files from Git branch: {branch_name}...")
     repo_path = Path(repo_dir)
     
     if repo_url: repo_url = repo_url.strip().strip('"').strip("'")
@@ -218,7 +217,7 @@ def main():
     readme_key = st.sidebar.text_input("ReadMe API Key", key="readme_key", type="password")
     gemini_key = st.sidebar.text_input("Gemini API Key", key="gemini_key", type="password")
     
-    st.sidebar.subheader("Git Repo Config")
+    st.sidebar.subheader("Git Repo Config (Read Only)")
     repo_path = st.sidebar.text_input("Local Clone Path", value="./cloned_repo")
     if st.sidebar.button("🗑️ Reset Repo"):
         if delete_repo(repo_path): st.sidebar.success("Deleted successfully.")
@@ -230,7 +229,7 @@ def main():
     st.sidebar.button("🔒 Clear Credentials", on_click=clear_credentials)
 
     st.sidebar.subheader("ReadMe API Settings")
-    api_slug = st.sidebar.text_input("API Slug", value="deletelineagenew")
+    api_slug = st.sidebar.text_input("API Slug", value="")
     api_domain = st.sidebar.text_input("API Domain", value="api.example.com")
     
     st.sidebar.subheader("Internal Paths")
@@ -255,9 +254,8 @@ def main():
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
     
     with col2: 
-        # Dynamic Target Toggle
         target_type = st.radio("Upload Target Type", ["Version", "Branch"], horizontal=True)
-        target_name = st.text_input(f"Target ReadMe {target_type}", "v2026.2.1-0")
+        target_name = st.text_input(f"Target ReadMe {target_type}", "v2026.3.0-0")
 
     st.markdown("### Settings")
     c1, c2, c3 = st.columns(3)
@@ -266,8 +264,8 @@ def main():
     use_readme = c3.checkbox("ReadMe CLI (v10)", True)
 
     c_btn1, c_btn2 = st.columns(2)
-    btn_validate = c_btn1.button("🔍 Validate")
-    btn_upload = c_btn2.button("🚀 Push to ReadMe Refactored & Git", type="primary")
+    btn_validate = c_btn1.button("🔍 Validate Only")
+    btn_upload = c_btn2.button("☁️ Upload to ReadMe", type="primary")
 
     log_container = st.empty()
     download_placeholder = st.empty()
@@ -288,7 +286,7 @@ def main():
              st.error("❌ An API Slug is required for ReadMe Refactored uploads. Please enter it in the sidebar.")
              st.stop()
 
-        # 1. Clone/Setup Git Repo
+        # 1. Clone/Setup Git Repo (DOWNLOAD ONLY)
         setup_git_repo(repo_url, repo_path, git_token, git_user, git_branch_source, logger)
         
         # 2. Prepare & Edit Files in Workspace
@@ -319,7 +317,6 @@ def main():
             validate_env(readme_key, required=True)
             logger.info(f"☁️ Uploading to ReadMe {target_type}: {target_name} using slug: {api_slug}...")
             
-            # Dynamically set the flag based on user selection
             target_flag = f"--version={target_name}" if target_type == "Version" else f"--branch={target_name}"
             
             rdme_cmd = [
@@ -334,31 +331,6 @@ def main():
             else:
                 st.error(f"❌ ReadMe Upload Failed. Check your API key, {target_type.lower()} name, and slug.")
                 st.stop()
-            
-            # --- BACKUP TO GIT ---
-            logger.info("🔄 Syncing changes to Git Backup...")
-            repo_root = Path(repo_path).resolve()
-            dest_in_repo = abs_spec_path / f"{selected_file}.yaml" 
-            dest_in_repo.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(edited_file, dest_in_repo)
-
-            run_command(["git", "config", "user.email", "bot@streamlit.app"], logger, cwd=repo_root)
-            run_command(["git", "config", "user.name", "Streamlit Bot"], logger, cwd=repo_root)
-
-            subprocess.run(["git", "add", "."], cwd=repo_root)
-            status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True)
-            
-            if not status.stdout.strip():
-                st.warning("⚠️ No changes detected to commit to Git.")
-            else:
-                commit_msg = f"Update {selected_file}.yaml via Streamlit Validator"
-                if run_command(["git", "commit", "-m", commit_msg], logger, cwd=repo_root) == 0:
-                    if run_command(["git", "push", "origin", f"HEAD:{git_branch_source}"], logger, cwd=repo_root) == 0:
-                        st.success(f"✅ Successfully Backed Up to Git Branch: {git_branch_source}")
-                    else:
-                        st.error("❌ Git Push Failed. Check permissions/token.")
-                else:
-                    st.error("❌ Git Commit Failed.")
 
         else:
             st.success("Validation Passed.")
