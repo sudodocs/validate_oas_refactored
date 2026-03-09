@@ -355,11 +355,15 @@ def main():
             if needs_update:
                 with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
 
-            # --- THE FINAL, CORRECT CLI COMMAND (Using 'upload' subcommand) ---
-            cmd = [npx_path, "--yes", "rdme@latest", "openapi", "upload", clean_filename, "--key", readme_key]
-            
+            # --- THE FINAL, CORRECT CLI COMMAND (Refactored Compatible) ---
+            # 1. Remove "upload" (it is not a valid subcommand for 'openapi')
+            cmd = [npx_path, "--yes", "rdme@latest", "openapi", clean_filename, "--key", readme_key]
+
+            # 2. Use '--branch' instead of '--version' for Refactored projects
             if target_branch:
-                cmd.extend(["--version", target_branch])
+            
+                # If the user enters a specific branch, use the --branch flag
+                cmd.extend(["--branch", target_branch]))
                 
             if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
                 st.success("✅ Uploaded successfully via CLI!")
