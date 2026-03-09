@@ -101,61 +101,38 @@ def analyze_errors_with_ai(log_content, api_key, model_name):
         return response.text
     except Exception as e: return f"AI Error: {e}"
 
-# --- Smart ID Lookup ---
-def get_api_id_smart(api_title, api_key, target_version, logger):
-    headers = {
-        "Authorization": f"Basic {api_key}", 
-        "Accept": "application/json",
-        "x-readme-version": target_version
-    }
-    base_url = "https://dash.readme.com/api/v1"
-    try:
-        logger.info(f"🔎 Looking for ID for: '{api_title}' in branch/version '{target_version}'")
-        def tokenize(text): return set(re.findall(r'\w+', text.lower()))
-        target_tokens = tokenize(api_title)
-        res = requests.get(f"{base_url}/api-specification", headers=headers, params={"perPage": 100})
-        
-        if res.status_code == 200:
-            apis = res.json()
-            for api in apis:
-                if api["title"] == api_title: return api["_id"], api["title"]
-            for api in apis:
-                if target_tokens == tokenize(api["title"]):
-                    logger.info(f"✨ Smart Match found: '{api['title']}'")
-                    return api["_id"], api["title"]
-            logger.warning(f"⚠️ No matching API found for '{api_title}'")
-            
-        elif res.status_code == 403:
-            logger.warning("⚠️ ID Lookup Blocked (403). ReadMe restricts REST API access for Git-backed projects. The CLI will handle matching.")
-        else: 
-            logger.error(f"❌ ReadMe API Error: {res.status_code}")
-    except Exception as e: 
-        logger.error(f"❌ ID Lookup Exception: {e}")
-    return None, None
-
 # --- Git Logic ---
 def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, logger):
     logger.info(f"🚀 Starting Git Operation for branch: {branch_name}...")
     repo_path = Path(repo_dir)
+    
+    # Clean up URL
     if repo_url: repo_url = repo_url.strip().strip('"').strip("'")
     if repo_url and repo_url.count("https://") > 1:
         match = re.search(r"(https://github\.com/.*)$", repo_url)
         if match: repo_url = match.group(1)
+    
+    # Inject credentials into URL
     auth_repo_url = repo_url
     if repo_url and git_username and git_token:
         parsed = urllib.parse.urlparse(repo_url)
         clean_netloc = parsed.netloc.split("@")[-1]
         auth_repo_url = urllib.parse.urlunparse((parsed.scheme, f"{git_username}:{git_token}@{clean_netloc}", parsed.path, parsed.params, parsed.query, parsed.fragment))
+    
     env_vars = os.environ.copy(); env_vars["GIT_TERMINAL_PROMPT"] = "0"
+    
     if not repo_path.exists():
+        # Clone specific branch
         if run_command(["git", "clone", "--depth", "1", "--branch", branch_name, auth_repo_url, str(repo_path)], logger) != 0:
-            st.error("Git Clone Failed."); st.stop()
+            st.error("Git Clone Failed. Check branch name and credentials."); st.stop()
     else:
         try:
+            # Update remote and fetch
             subprocess.run(["git", "-C", str(repo_path), "remote", "set-url", "origin", auth_repo_url], check=True, env=env_vars)
             subprocess.run(["git", "-C", str(repo_path), "fetch", "origin", branch_name], check=True, env=env_vars)
             subprocess.run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch_name}"], check=True, env=env_vars)
-        except: logger.warning("Git update failed, using existing files.")
+        except Exception as e: 
+            logger.warning(f"Git update failed, using existing files: {e}")
 
 def delete_repo(repo_dir):
     path = Path(repo_dir)
@@ -165,8 +142,10 @@ def delete_repo(repo_dir):
 # --- File Operations ---
 def prepare_files(filename, paths, workspace, dependency_list, logger):
     source = None
+    # Check primary specs path
     main_candidate = Path(paths['specs']) / f"{filename}.yaml"
     if main_candidate.exists(): source = main_candidate
+    # Check secondary path
     elif paths.get('secondary') and (Path(paths['secondary']) / f"{filename}.yaml").exists():
         source = Path(paths['secondary']) / f"{filename}.yaml"
 
@@ -175,21 +154,27 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     workspace_path = Path(workspace)
     workspace_path.mkdir(parents=True, exist_ok=True)
     
+    # Calculate relative path to preserve structure in workspace
     try:
+        # Try to resolve relative to specs dir
         rel_path = source.resolve().relative_to(paths['specs'].resolve())
-        destination = workspace_path / rel_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
     except ValueError:
-        destination = workspace_path / source.name
+        # Fallback to just filename
+        rel_path = source.name
+
+    destination = workspace_path / rel_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
     shutil.copy(source, destination)
     logger.info(f"📂 Copied YAML to workspace: {destination.relative_to(workspace_path)}")
 
+    # Copy dependencies
     for folder in dependency_list:
         clean = folder.strip()
         if not clean: continue
         src_dir = Path(paths['specs']) / clean
         dest_dir = workspace_path / clean
+        
         if src_dir.exists():
             if dest_dir.exists(): shutil.rmtree(dest_dir)
             shutil.copytree(src_dir, dest_dir)
@@ -202,11 +187,13 @@ def process_yaml_content(file_path, api_domain, target_version, logger):
     try:
         with open(file_path, "r") as f: data = yaml.safe_load(f)
         
+        # Ensure info object exists
         if "info" not in data:
             data["info"] = {"title": file_path.stem, "version": target_version}
         else:
             data["info"]["version"] = target_version
 
+        # Inject x-readme if missing
         if "openapi" in data:
             pos = list(data.keys()).index("openapi")
             items = list(data.items())
@@ -214,6 +201,7 @@ def process_yaml_content(file_path, api_domain, target_version, logger):
                 items.insert(pos + 1, ("x-readme", {"explorer-enabled": False}))
                 data = dict(items)
                 
+        # Inject Servers
         domain = api_domain if api_domain else "example.com"
         if "servers" not in data or not data["servers"]: data["servers"] = [{"url": f"https://{domain}", "variables": {}}]
         if "variables" not in data["servers"][0]: data["servers"][0]["variables"] = {}
@@ -290,7 +278,7 @@ def main():
 
     c_btn1, c_btn2 = st.columns(2)
     btn_validate = c_btn1.button("🔍 Validate")
-    btn_upload = c_btn2.button("🚀 Upload", type="primary")
+    btn_upload = c_btn2.button("🚀 Push to Git (Upload)", type="primary")
 
     log_container = st.empty()
     download_placeholder = st.empty()
@@ -304,77 +292,78 @@ def main():
         handler = StreamlitLogHandler(log_container, download_placeholder)
         logger.addHandler(handler)
 
-        has_key = validate_env(readme_key, required=btn_upload)
+        has_key = validate_env(readme_key, required=False) # Key not needed for Git Push
         npx_path = get_npx_path()
         if not npx_path: logger.error("❌ NodeJS/npx not found."); st.stop()
 
+        # 1. Clone/Setup Git Repo
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
+        
+        # 2. Prepare & Edit Files in Workspace
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
         edited_file = process_yaml_content(final_yaml_path, api_domain, target_branch, logger)
         
         st.session_state.current_edited_file = str(edited_file)
-
-        # Removed duplicate download logic here to prevent StreamlitDuplicateElementId error.
-
         abs_execution_dir = edited_file.parent.resolve()
-        
-        # Pure filename string to avoid path parsing bugs in the CLI
         clean_filename = edited_file.name
 
         # --- VALIDATE ---
         failed = False
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
-        if use_readme and has_key and run_command([npx_path, "--yes", "rdme@latest", "openapi:validate", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
-
+        
+        # NOTE: Skipped rdme:validate since it might require internet/API checks that fail in restricted envs
+        
         if failed:
             st.error("Validation Failed.")
             if btn_upload: st.stop()
         
         elif btn_upload:
-            logger.info("🚀 Preparing Upload via ReadMe CLI...")
+            logger.info("🚀 Starting Git Push Sequence...")
             
-            with open(edited_file, "r") as f:
-                ydata = yaml.safe_load(f)
-                ytitle = ydata.get("info", {}).get("title", "")
+            # --- GIT PUSH LOGIC (Replaces rdme CLI) ---
+            repo_root = Path(repo_path).resolve()
             
-            api_id, matched_title = get_api_id_smart(ytitle, readme_key, target_branch, logger)
+            # 1. Determine destination path in repo
+            # We assume the file goes into the main 'specs' folder defined in sidebar
+            dest_in_repo = abs_spec_path / f"{selected_file}.yaml" 
             
-            needs_update = False
-            if api_id:
-                logger.info(f"📤 Injecting ID {api_id} for updating...")
-                if "x-readme" not in ydata: ydata["x-readme"] = {}
-                ydata["x-readme"]["id"] = api_id
-                needs_update = True
-                
-            if matched_title and matched_title != ytitle:
-                logger.info(f"🔧 Auto-correcting title: '{ytitle}' -> '{matched_title}'")
-                ydata["info"]["title"] = matched_title
-                needs_update = True
+            # Ensure destination directory exists
+            dest_in_repo.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 2. Copy the processed/validated file back to the repo
+            shutil.copy(edited_file, dest_in_repo)
+            logger.info(f"📂 Updated file in repo: {dest_in_repo}")
 
-            if needs_update:
-                with open(edited_file, "w") as f: yaml.dump(ydata, f, sort_keys=False)
+            # 3. Configure Git (Required for CI/Cloud)
+            run_command(["git", "config", "user.email", "bot@streamlit.app"], logger, cwd=repo_root)
+            run_command(["git", "config", "user.name", "Streamlit Bot"], logger, cwd=repo_root)
 
-            # --- THE FINAL, CORRECT CLI COMMAND (Refactored Compatible) ---
-            # 1. Remove "upload" (it is not a valid subcommand for 'openapi')
+            # 4. Commit and Push
+            # Check if there are changes
+            subprocess.run(["git", "add", "."], cwd=repo_root)
+            status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True)
             
-            cmd = [npx_path, "--yes", "rdme@latest", "openapi", str(edited_file.resolve()), "--key", readme_key]
-
-            # 2. Use '--branch' instead of '--version' for Refactored projects
-            if target_branch:
-            
-                # If the user enters a specific branch, use the --branch flag
-                cmd.extend(["--branch", target_branch])
-                
-            if run_command(cmd, logger, cwd=abs_execution_dir) == 0:
-                st.success("✅ Uploaded successfully via CLI!")
+            if not status.stdout.strip():
+                st.warning("⚠️ No changes detected to commit.")
             else:
-                st.error("❌ CLI Upload failed. (See logs for details)")
+                commit_msg = f"Update {selected_file}.yaml via Streamlit Validator"
+                if run_command(["git", "commit", "-m", commit_msg], logger, cwd=repo_root) == 0:
+                    logger.info(f"✅ Committed changes to {target_branch}")
+                    
+                    # Push
+                    if run_command(["git", "push", "origin", target_branch], logger, cwd=repo_root) == 0:
+                        st.success(f"✅ Successfully Pushed to Branch: {target_branch}")
+                        st.info("Check the ReadMe Dashboard in ~30 seconds to see the update.")
+                    else:
+                        st.error("❌ Git Push Failed. Check permissions/token.")
+                else:
+                    st.error("❌ Git Commit Failed.")
 
         else:
             st.success("Validation Passed.")
 
-    # Show download button exactly once to avoid DuplicateElementId crashes
+    # Show download button exactly once
     if st.session_state.current_edited_file:
          p = Path(st.session_state.current_edited_file)
          if p.exists():
@@ -384,7 +373,7 @@ def main():
                      data=f.read(), 
                      file_name=p.name, 
                      mime="application/x-yaml",
-                     key="download_edited_yaml_btn" # Unique key secures it
+                     key="download_edited_yaml_btn"
                  )
 
     if st.session_state.logs and st.button("Clear Logs"): st.session_state.logs = []
