@@ -106,13 +106,11 @@ def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, log
     logger.info(f"🚀 Starting Git Operation for branch: {branch_name}...")
     repo_path = Path(repo_dir)
     
-    # Clean up URL
     if repo_url: repo_url = repo_url.strip().strip('"').strip("'")
     if repo_url and repo_url.count("https://") > 1:
         match = re.search(r"(https://github\.com/.*)$", repo_url)
         if match: repo_url = match.group(1)
     
-    # Inject credentials into URL
     auth_repo_url = repo_url
     if repo_url and git_username and git_token:
         parsed = urllib.parse.urlparse(repo_url)
@@ -122,12 +120,10 @@ def setup_git_repo(repo_url, repo_dir, git_token, git_username, branch_name, log
     env_vars = os.environ.copy(); env_vars["GIT_TERMINAL_PROMPT"] = "0"
     
     if not repo_path.exists():
-        # Clone specific branch
         if run_command(["git", "clone", "--depth", "1", "--branch", branch_name, auth_repo_url, str(repo_path)], logger) != 0:
             st.error("Git Clone Failed. Check branch name and credentials."); st.stop()
     else:
         try:
-            # Update remote and fetch
             subprocess.run(["git", "-C", str(repo_path), "remote", "set-url", "origin", auth_repo_url], check=True, env=env_vars)
             subprocess.run(["git", "-C", str(repo_path), "fetch", "origin", branch_name], check=True, env=env_vars)
             subprocess.run(["git", "-C", str(repo_path), "reset", "--hard", f"origin/{branch_name}"], check=True, env=env_vars)
@@ -142,10 +138,8 @@ def delete_repo(repo_dir):
 # --- File Operations ---
 def prepare_files(filename, paths, workspace, dependency_list, logger):
     source = None
-    # Check primary specs path
     main_candidate = Path(paths['specs']) / f"{filename}.yaml"
     if main_candidate.exists(): source = main_candidate
-    # Check secondary path
     elif paths.get('secondary') and (Path(paths['secondary']) / f"{filename}.yaml").exists():
         source = Path(paths['secondary']) / f"{filename}.yaml"
 
@@ -154,12 +148,9 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     workspace_path = Path(workspace)
     workspace_path.mkdir(parents=True, exist_ok=True)
     
-    # Calculate relative path to preserve structure in workspace
     try:
-        # Try to resolve relative to specs dir
         rel_path = source.resolve().relative_to(paths['specs'].resolve())
     except ValueError:
-        # Fallback to just filename
         rel_path = source.name
 
     destination = workspace_path / rel_path
@@ -168,7 +159,6 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
     shutil.copy(source, destination)
     logger.info(f"📂 Copied YAML to workspace: {destination.relative_to(workspace_path)}")
 
-    # Copy dependencies
     for folder in dependency_list:
         clean = folder.strip()
         if not clean: continue
@@ -182,18 +172,14 @@ def prepare_files(filename, paths, workspace, dependency_list, logger):
             
     return destination
 
-def process_yaml_content(file_path, api_domain, target_version, logger):
-    logger.info(f"🛠️ Injecting extensions and setting version to '{target_version}'...")
+def process_yaml_content(file_path, api_domain, logger):
+    logger.info("🛠️ Injecting extensions and server defaults...")
     try:
         with open(file_path, "r") as f: data = yaml.safe_load(f)
         
-        # Ensure info object exists
         if "info" not in data:
-            data["info"] = {"title": file_path.stem, "version": target_version}
-        else:
-            data["info"]["version"] = target_version
+            data["info"] = {"title": file_path.stem, "version": "1.0.0"}
 
-        # Inject x-readme if missing
         if "openapi" in data:
             pos = list(data.keys()).index("openapi")
             items = list(data.items())
@@ -201,7 +187,6 @@ def process_yaml_content(file_path, api_domain, target_version, logger):
                 items.insert(pos + 1, ("x-readme", {"explorer-enabled": False}))
                 data = dict(items)
                 
-        # Inject Servers
         domain = api_domain if api_domain else "example.com"
         if "servers" not in data or not data["servers"]: data["servers"] = [{"url": f"https://{domain}", "variables": {}}]
         if "variables" not in data["servers"][0]: data["servers"][0]["variables"] = {}
@@ -222,8 +207,6 @@ def clear_credentials():
     st.session_state.git_token = ""
     st.session_state.logs = []
 
-def clear_logs(): st.session_state.logs = []
-
 # --- MAIN ---
 def main():
     ensure_node_installed()
@@ -241,24 +224,27 @@ def main():
         if delete_repo(repo_path): st.sidebar.success("Deleted successfully.")
 
     repo_url = st.sidebar.text_input("Git Repo URL", key="repo_url")
-    branch_name = st.sidebar.text_input("Branch Source", value="main")
+    branch_name = st.sidebar.text_input("Git Branch Source", value="main")
     git_user = st.sidebar.text_input("Git User", key="git_user")
     git_token = st.sidebar.text_input("Git Token", key="git_token", type="password")
     st.sidebar.button("🔒 Clear Credentials", on_click=clear_credentials)
 
+    st.sidebar.subheader("ReadMe API Settings")
+    api_slug = st.sidebar.text_input("API Slug (e.g., my-api-reference)", value="")
+    api_domain = st.sidebar.text_input("API Domain", value="api.example.com")
+    
     st.sidebar.subheader("Internal Paths")
     spec_rel_path = st.sidebar.text_input("Main Specs Path", value="specs")
     secondary_rel_path = st.sidebar.text_input("Secondary Path", value="")
     dep_input = st.sidebar.text_input("Dependencies", value="common")
     dependency_list = [x.strip() for x in dep_input.split(",")]
-    api_domain = st.sidebar.text_input("API Domain", value="api.example.com")
 
     abs_spec_path = Path(repo_path) / spec_rel_path
     paths = {"repo": repo_path, "specs": abs_spec_path}
     if secondary_rel_path: paths["secondary"] = Path(repo_path) / secondary_rel_path
     workspace_dir = "./temp_workspace"
 
-    st.title("🚀 Refactored OpenAPI Validator")
+    st.title("🚀 ReadMe Refactored OpenAPI Validator")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -268,17 +254,17 @@ def main():
         files = sorted(list(set(files)))
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
     with col2: 
-        target_branch = st.text_input("Target ReadMe Branch/Version", "main")
+        target_branch = st.text_input("Target ReadMe Branch", "v2026.2.1-0_lineage-API-AL-229432")
 
     st.markdown("### Settings")
     c1, c2, c3 = st.columns(3)
     use_swagger = c1.checkbox("Swagger", True)
     use_redocly = c2.checkbox("Redocly", True)
-    use_readme = c3.checkbox("ReadMe CLI", False)
+    use_readme = c3.checkbox("ReadMe CLI (v10)", True)
 
     c_btn1, c_btn2 = st.columns(2)
     btn_validate = c_btn1.button("🔍 Validate")
-    btn_upload = c_btn2.button("🚀 Push to Git (Upload)", type="primary")
+    btn_upload = c_btn2.button("🚀 Push to ReadMe Refactored & Git", type="primary")
 
     log_container = st.empty()
     download_placeholder = st.empty()
@@ -292,16 +278,19 @@ def main():
         handler = StreamlitLogHandler(log_container, download_placeholder)
         logger.addHandler(handler)
 
-        has_key = validate_env(readme_key, required=False) # Key not needed for Git Push
         npx_path = get_npx_path()
         if not npx_path: logger.error("❌ NodeJS/npx not found."); st.stop()
+
+        if btn_upload and not api_slug:
+             st.error("❌ An API Slug is required for ReadMe Refactored uploads. Please enter it in the sidebar.")
+             st.stop()
 
         # 1. Clone/Setup Git Repo
         setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
         
         # 2. Prepare & Edit Files in Workspace
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
-        edited_file = process_yaml_content(final_yaml_path, api_domain, target_branch, logger)
+        edited_file = process_yaml_content(final_yaml_path, api_domain, logger)
         
         st.session_state.current_edited_file = str(edited_file)
         abs_execution_dir = edited_file.parent.resolve()
@@ -312,49 +301,56 @@ def main():
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         
-        # NOTE: Skipped rdme:validate since it might require internet/API checks that fail in restricted envs
+        # Validation using rdme v10 syntax
+        if use_readme:
+            logger.info("🔍 Validating with ReadMe CLI v10...")
+            if run_command([npx_path, "--yes", "rdme@10", "openapi", "validate", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         
         if failed:
             st.error("Validation Failed.")
             if btn_upload: st.stop()
         
         elif btn_upload:
-            logger.info("🚀 Starting Git Push Sequence...")
+            logger.info("🚀 Starting Upload Sequence for ReadMe Refactored...")
             
-            # --- GIT PUSH LOGIC (Replaces rdme CLI) ---
+            # --- UPLOAD TO README REFACTORED ---
+            validate_env(readme_key, required=True)
+            logger.info(f"☁️ Uploading to ReadMe branch: {target_branch} using slug: {api_slug}...")
+            
+            # Using the new Refactored upload syntax
+            rdme_cmd = [
+                npx_path, "--yes", "rdme@10", "openapi", "upload", clean_filename, 
+                f"--branch={target_branch}", 
+                f"--key={readme_key}",
+                f"--slug={api_slug}"
+            ]
+            
+            if run_command(rdme_cmd, logger, cwd=abs_execution_dir) == 0:
+                st.success(f"✅ Successfully Uploaded to ReadMe Branch: {target_branch}")
+            else:
+                st.error("❌ ReadMe Upload Failed. Check your API key, branch name, and slug.")
+                st.stop()
+            
+            # --- BACKUP TO GIT ---
+            logger.info("🔄 Syncing changes to Git Backup...")
             repo_root = Path(repo_path).resolve()
-            
-            # 1. Determine destination path in repo
-            # We assume the file goes into the main 'specs' folder defined in sidebar
             dest_in_repo = abs_spec_path / f"{selected_file}.yaml" 
-            
-            # Ensure destination directory exists
             dest_in_repo.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 2. Copy the processed/validated file back to the repo
             shutil.copy(edited_file, dest_in_repo)
-            logger.info(f"📂 Updated file in repo: {dest_in_repo}")
 
-            # 3. Configure Git (Required for CI/Cloud)
             run_command(["git", "config", "user.email", "bot@streamlit.app"], logger, cwd=repo_root)
             run_command(["git", "config", "user.name", "Streamlit Bot"], logger, cwd=repo_root)
 
-            # 4. Commit and Push
-            # Check if there are changes
             subprocess.run(["git", "add", "."], cwd=repo_root)
             status = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True)
             
             if not status.stdout.strip():
-                st.warning("⚠️ No changes detected to commit.")
+                st.warning("⚠️ No changes detected to commit to Git.")
             else:
                 commit_msg = f"Update {selected_file}.yaml via Streamlit Validator"
                 if run_command(["git", "commit", "-m", commit_msg], logger, cwd=repo_root) == 0:
-                    logger.info(f"✅ Committed changes to {target_branch}")
-                    
-                    # Push
-                    if run_command(["git", "push", "origin", f"HEAD:{target_branch}"], logger, cwd=repo_root) == 0:
-                        st.success(f"✅ Successfully Pushed to Branch: {target_branch}")
-                        st.info("Check the ReadMe Dashboard in ~30 seconds to see the update.")
+                    if run_command(["git", "push", "origin", f"HEAD:{branch_name}"], logger, cwd=repo_root) == 0:
+                        st.success(f"✅ Successfully Backed Up to Git Branch: {branch_name}")
                     else:
                         st.error("❌ Git Push Failed. Check permissions/token.")
                 else:
@@ -363,7 +359,6 @@ def main():
         else:
             st.success("Validation Passed.")
 
-    # Show download button exactly once
     if st.session_state.current_edited_file:
          p = Path(st.session_state.current_edited_file)
          if p.exists():
