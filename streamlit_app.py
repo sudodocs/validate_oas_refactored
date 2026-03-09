@@ -381,7 +381,7 @@ def main():
     if st.session_state.logs and gemini_key:
         if st.button("Analyze Logs with AI"):
              with st.spinner("Analyzing..."):
-                analysis = analyze_errors_with_ai("\n".join(st.session_state.logs), gemini_key, "gemini-2.0-flash")
+                analysis = analyze_errors_with_ai("\n".join(st.session_state.logs), gemini_key, "gemini-2.5-flash")
                 st.markdown(analysis)
 
 if __name__ == "__main__": main()
