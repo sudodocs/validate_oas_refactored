@@ -224,13 +224,13 @@ def main():
         if delete_repo(repo_path): st.sidebar.success("Deleted successfully.")
 
     repo_url = st.sidebar.text_input("Git Repo URL", key="repo_url")
-    branch_name = st.sidebar.text_input("Git Branch Source", value="main")
+    git_branch_source = st.sidebar.text_input("Git Branch Source", value="main")
     git_user = st.sidebar.text_input("Git User", key="git_user")
     git_token = st.sidebar.text_input("Git Token", key="git_token", type="password")
     st.sidebar.button("🔒 Clear Credentials", on_click=clear_credentials)
 
     st.sidebar.subheader("ReadMe API Settings")
-    api_slug = st.sidebar.text_input("API Slug (e.g., my-api-reference)", value="")
+    api_slug = st.sidebar.text_input("API Slug", value="deletelineagenew")
     api_domain = st.sidebar.text_input("API Domain", value="api.example.com")
     
     st.sidebar.subheader("Internal Paths")
@@ -253,8 +253,11 @@ def main():
         if "secondary" in paths and paths["secondary"].exists(): files.extend([f.stem for f in paths["secondary"].glob("*.yaml")])
         files = sorted(list(set(files)))
         selected_file = st.selectbox("Select File", files) if files else st.text_input("Filename", "audit")
+    
     with col2: 
-        target_branch = st.text_input("Target ReadMe Branch", "v2026.2.1-0_lineage-API-AL-229432")
+        # Dynamic Target Toggle
+        target_type = st.radio("Upload Target Type", ["Version", "Branch"], horizontal=True)
+        target_name = st.text_input(f"Target ReadMe {target_type}", "v2026.2.1-0")
 
     st.markdown("### Settings")
     c1, c2, c3 = st.columns(3)
@@ -286,7 +289,7 @@ def main():
              st.stop()
 
         # 1. Clone/Setup Git Repo
-        setup_git_repo(repo_url, repo_path, git_token, git_user, branch_name, logger)
+        setup_git_repo(repo_url, repo_path, git_token, git_user, git_branch_source, logger)
         
         # 2. Prepare & Edit Files in Workspace
         final_yaml_path = prepare_files(selected_file, paths, workspace_dir, dependency_list, logger)
@@ -301,7 +304,6 @@ def main():
         if use_swagger and run_command([npx_path, "--yes", "swagger-cli", "validate", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         if use_redocly and run_command([npx_path, "--yes", "@redocly/cli@1.25.0", "lint", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
         
-        # Validation using rdme v10 syntax
         if use_readme:
             logger.info("🔍 Validating with ReadMe CLI v10...")
             if run_command([npx_path, "--yes", "rdme@10", "openapi", "validate", clean_filename], logger, cwd=abs_execution_dir) != 0: failed = True
@@ -315,20 +317,22 @@ def main():
             
             # --- UPLOAD TO README REFACTORED ---
             validate_env(readme_key, required=True)
-            logger.info(f"☁️ Uploading to ReadMe branch: {target_branch} using slug: {api_slug}...")
+            logger.info(f"☁️ Uploading to ReadMe {target_type}: {target_name} using slug: {api_slug}...")
             
-            # Using the new Refactored upload syntax
+            # Dynamically set the flag based on user selection
+            target_flag = f"--version={target_name}" if target_type == "Version" else f"--branch={target_name}"
+            
             rdme_cmd = [
                 npx_path, "--yes", "rdme@10", "openapi", "upload", clean_filename, 
-                f"--branch={target_branch}", 
+                target_flag, 
                 f"--key={readme_key}",
                 f"--slug={api_slug}"
             ]
             
             if run_command(rdme_cmd, logger, cwd=abs_execution_dir) == 0:
-                st.success(f"✅ Successfully Uploaded to ReadMe Branch: {target_branch}")
+                st.success(f"✅ Successfully Uploaded to ReadMe {target_type}: {target_name}")
             else:
-                st.error("❌ ReadMe Upload Failed. Check your API key, branch name, and slug.")
+                st.error(f"❌ ReadMe Upload Failed. Check your API key, {target_type.lower()} name, and slug.")
                 st.stop()
             
             # --- BACKUP TO GIT ---
@@ -349,8 +353,8 @@ def main():
             else:
                 commit_msg = f"Update {selected_file}.yaml via Streamlit Validator"
                 if run_command(["git", "commit", "-m", commit_msg], logger, cwd=repo_root) == 0:
-                    if run_command(["git", "push", "origin", f"HEAD:{branch_name}"], logger, cwd=repo_root) == 0:
-                        st.success(f"✅ Successfully Backed Up to Git Branch: {branch_name}")
+                    if run_command(["git", "push", "origin", f"HEAD:{git_branch_source}"], logger, cwd=repo_root) == 0:
+                        st.success(f"✅ Successfully Backed Up to Git Branch: {git_branch_source}")
                     else:
                         st.error("❌ Git Push Failed. Check permissions/token.")
                 else:
