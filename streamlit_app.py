@@ -352,7 +352,7 @@ def main():
                     logger.info(f"✅ Committed changes to {target_branch}")
                     
                     # Push
-                    if run_command(["git", "push", "origin", target_branch], logger, cwd=repo_root) == 0:
+                    if run_command(["git", "push", "origin", f"HEAD:{target_branch}"], logger, cwd=repo_root) == 0:
                         st.success(f"✅ Successfully Pushed to Branch: {target_branch}")
                         st.info("Check the ReadMe Dashboard in ~30 seconds to see the update.")
                     else:
